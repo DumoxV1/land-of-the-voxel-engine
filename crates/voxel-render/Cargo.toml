@@ -8,3 +8,6 @@ license.workspace = true
 voxel-core = { path = "../voxel-core" }
 voxel-mesher = { path = "../voxel-mesher" }
 image = "0.25"
+
+[dev-dependencies]
+voxel-worldgen = { path = "../voxel-worldgen" }

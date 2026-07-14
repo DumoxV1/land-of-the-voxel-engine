@@ -19,7 +19,7 @@ Een filmische, zeer rijke en dynamische openwereld-RPG op een eigen micro-voxelf
 Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontroleerd en wordt plan-alignment expliciet vastgelegd in `docs/governance/alignment-log.md`.
 
 **Status:** researchreview en plansynthese VOLTOOID  \
-**Actieve fase:** Fase 0 → engine-startgate GEOPEND (S-01 voxel-core + S-01-hardening + S-02 mesher + S-03 software-raster onder strict TDD)  \
+**Actieve fase:** Fase 0 → engine-startgate GEOPEND (S-01 voxel-core + S-01-hardening + S-02 mesher + S-03 software-raster + S-04 worldgen onder strict TDD)  \
 **Laatste update:** 2026-07-15
 
 ## Volgende gates
@@ -30,7 +30,8 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
 5. ✅ S-01-hardening: drie chunk-states (`Uniform`/`PalettePacked`/`Dense`) + 4-bit bitpacking + per-chunk palette (≤16), byte-stabiel versie-2 formaat. 7 nieuwe failing tests → groen.
 6. ✅ S-01-hardening: drie chunk-states (`Uniform`/`PalettePacked`/`Dense`) + 4-bit bitpacking + per-chunk palette (≤16), byte-stabiel versie-2 formaat. 7 nieuwe failing tests → groen.
 7. ✅ S-03 software-raster spike: `voxel-render` crate, `Camera` (perspectief) + `render_scene` (z-buffer, per-normaal shading) → PNG. 3 failing tests → groen; demo-PNG gegenereerd en visueel geverifieerd (voxel-scène herkenbaar). Geen GPU/renderer-dep in core-crates (ADR-0002).
-8. ⏳ Volgende: S-03 uitbreiden (meer demo-scenario's / schaal) of S-04 (client-shell/input — wgpu naargelang Fase-2 benchmark) — keuze autonoom volgende sessie.
+8. ✅ S-04 deterministische worldgen spike: `voxel-worldgen` crate, `generate_chunk(coord, seed)` (seeded value-noise heightmap, grass/dirt/stone lagen). 5 failing tests → groen (determinisme, seed-verschil, chunk-grenscontinuïteit, niet-leeg, laagstructuur). demo_worldgen.png visueel geverifieerd als rollende, scheurvrije terrain. Renderer-agnostisch (alleen voxel-core).
+9. ⏳ Volgende: S-05 (multi-chunk wereld / streaming-basis) of S-04 uitbreiden (meer materialen/biomes, macro/micro-niveaus per plan §2.1) — keuze autonoom volgende sessie. Client-shell (Godot vs Bevy/wgpu) blijft Fase-2 benchmark-gate, NIET autonoom gestart.
 
 ## Auditwaarschuwing
 Researchmemo’s zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.

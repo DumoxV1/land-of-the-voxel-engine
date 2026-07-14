@@ -117,3 +117,18 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - **Verholpen**: twee tests toegevoegd aan `spike_s01_hardening.rs` — `boundary_high_nibble_round_trips` en `promotion_preserves_all_values_then_continues_edits`. Eerste test-versie had zelf een foute aanname (telde baseline(0) niet mee als distinct → 17 ipv 16); gecorrigeerd naar baseline+15 = 16 distinct → PalettePacked, 17e = Dense. Review-gaps nu gedicht.
 - Verificatie: `cargo test --workspace` 27/27 groen (voxel-core 15, voxel-mesher 6, voxel-render 3).
 - Status: aligned. Geen drift; geen betaalde calls.
+
+## 2026-07-15 — S-04 deterministische worldgen spike voltooid (strict TDD) + verplichte terugstap na uitvoeringsstap 3
+- Autonome keuze: S-04 worldgen (canoniek plan §4 Fase-1 deliverable: "deterministische worldgen met seed"). Geen nieuwe architectuurbeslissing nodig; valt binnen bestaande ADR's. Client-shell (Godot vs Bevy/wgpu) expliciet NIET gestart — dat is de Fase-2 benchmark-gate.
+- Strict TDD:
+  - ROOD: `crates/voxel-worldgen` crate (workspace member), `spike-s04-worldgen.md` plan, `tests/spike_s04.rs` (5 failing tests: determinisme, seed-verschil, chunk-grens, niet-leeg, laagstructuur) — `cargo test -p voxel-worldgen` faalde met "unresolved import generate_chunk".
+  - GROEN: `generate_chunk(coord, seed)` — seeded value-noise heightmap op wereld-X/Z (hash + bilineaire interpolatie), grass(2)/dirt(1)/stone(3) lagen. Determinisme + grensoverschrijdende continuïteit volgen gratis omdat hoogte een pure functie van wereld-X/Z is. Renderer-agnostisch (alleen voxel-core).
+  - Test-fout tijdens TDD gecorrigeerd: `chunk_boundary_continuous` vergeleek ten onrechte chunk A local-x=31 (wereld-X=31) met chunk B local-x=0 (wereld-X=32) op gelijkheid — dat zijn opeenvolgende wereldkolommen, géén zelfde kolom. Hernomen naar de correcte continuïteitseis: hoogtestap over de chunk-grens mag niet groter zijn dan binnen-chunk-stappen. Generator was correct.
+- Verificatie:
+  - `cargo test -p voxel-worldgen`: 5/5 groen.
+  - `cargo test --workspace`: 32 tests groen (voxel-core 15, voxel-mesher 6, voxel-render 3, voxel-worldgen 5).
+  - `examples/demo_worldgen.rs` → `demo_worldgen.png` (320x320, 28668 niet-achtergrondpixels). Visueel geverifieerd: rollend, continu oppervlak, gras/dirt/stone-lagen, geen scheuren.
+  - Renderer-agnostisch (ADR-0002): `voxel-worldgen` depends alleen op `voxel-core`; geen godot/bevy/wgpu.
+- Verplichte terugstap (na 3e uitvoeringsstap): plan-alignment OK (canoniek plan + ADR's 0001–0003 + S-04 plan intact). S-01-hardening review ingevlogen en verwerkt (9056d81). Budgetguard project-key spent $27,5299 (onder €30 → paid blijft dicht; ver onder $36 stop). Geen drift; geen betaalde calls (alles lokaal + gratis `:free`).
+- Volgende stap (autonoom): S-05 multi-chunk wereld/streaming-basis, of S-04 uitbreiden (biomes/macro-micro per plan §2.1). Client-shell-keuze blijft Fase-2 gate.
+- Commit + push naar origin main (grens A) volgt.
