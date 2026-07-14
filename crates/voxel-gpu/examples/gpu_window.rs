@@ -39,6 +39,9 @@ struct App {
     last_mouse: Option<(f64, f64)>,
     // Max texture dimension of the adapter.
     max_dim: u32,
+    // Last configured surface size (for surface-loss recovery).
+    surf_w: u32,
+    surf_h: u32,
 }
 
 impl Default for App {
@@ -57,6 +60,8 @@ impl Default for App {
             dragging: false,
             last_mouse: None,
             max_dim: 2048,
+            surf_w: 1280,
+            surf_h: 800,
         }
     }
 }
@@ -153,6 +158,8 @@ impl ApplicationHandler for App {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(scene.device(), &config);
+        self.surf_w = surf_w;
+        self.surf_h = surf_h;
         self.window = Some(window);
         self.surface = Some(surface);
         self.scene = Some(scene);
@@ -212,9 +219,13 @@ impl ApplicationHandler for App {
                     };
                     surface.configure(scene.device(), &config);
                     self.camera.aspect = size.width as f32 / size.height as f32;
+                    self.surf_w = size.width.max(1).min(self.max_dim);
+                    self.surf_h = size.height.max(1).min(self.max_dim);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // Space (and any key) must not crash the loop. We simply track
+                // held keys; no key triggers exit or panics.
                 if event.state == ElementState::Pressed {
                     self.keys.insert(event.physical_key);
                 } else {
@@ -246,6 +257,8 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.update_camera();
                 self.render_frame();
+                // Continuous rendering: ask for the next frame. If the surface is
+                // lost we simply skip and the loop keeps trying next event.
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -329,7 +342,29 @@ impl App {
 
         let frame = surface.get_current_texture();
         let tex = match frame {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                t
+            }
+            // Surface lost / outdated (focus change, minimize, GPU reset, or the
+            // OS snapping the window when Space is pressed): reconfigure at the
+            // last known size and skip this frame instead of crashing.
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                if let (Some(scene), Some(surface)) = (&self.scene, &self.surface) {
+                    surface.configure(scene.device(), &wgpu::SurfaceConfiguration {
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        format: scene.format(),
+                        width: self.surf_w.max(1),
+                        height: self.surf_h.max(1),
+                        present_mode: wgpu::PresentMode::Fifo,
+                        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                        view_formats: vec![],
+                        desired_maximum_frame_latency: 2,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
+                    });
+                }
+                return;
+            }
+            // Timeout / Occluded / Validation: transient, just skip the frame.
             _ => return,
         };
         let view = tex.texture.create_view(&wgpu::TextureViewDescriptor::default());

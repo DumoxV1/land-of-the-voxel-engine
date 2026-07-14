@@ -48,9 +48,12 @@ Bevy/wgpu (ADR-0004, status Proposed).
 - [x] **Live micro-voxel client (S-13, 2026-07-15)**: `gpu_window` streamt een 12,5 cm-
       voxel-wereld rond een first-person free-fly camera (WASD + links-sleep = look),
       chunk-streaming binnen view-radius 24 (~96 m). Spawn = op terrain-hoogte.
-      Headless smoke-test (`client_smoke`) bevestigt de streaming-path: 120/120 frames,
-      géén panic. `cargo run --release --example gpu_window -p voxel-gpu` = rondlopen.
-      Zie README "Wat je nu kunt runnen".
+      Headless smoke-test (`client_smoke`) bevestigt: 120/120 frames, géén panic.
+- [x] **Mijlpaal 1 (2026-07-15): space-crash gefixt**. `gpu_window` crashte bij Space
+      (focus-wissel → `get_current_texture()` gaf `Lost`/`Outdated`, oude code herstelde
+      surface nooit). Nu: bij `Lost`/`Outdated` herconfigureert de client de surface op
+      laatst bekende grootte + skipt frame; `Timeout`/`Occluded` → skipt. Space = gewone
+      toets. Compileert schoon. (Volgende: lag fixen = S-12c deel 2 frustum-culling.)
 - [x] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
       **S-12c deel 1 GEDAAN (2026-07-15):** GPU-benchmark-harness (`examples/gpu_bench.rs` +
       `GpuScene::render_triangles` offscreen-pad) meet FPS op 1 km² (1024 chunks, RTX 4080).
