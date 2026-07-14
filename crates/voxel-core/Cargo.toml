@@ -1,0 +1,17 @@
+[package]
+name = "voxel-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1.4"
+
+[features]
+# Enables the property-based tests in tests/spike_s01.rs (proptest must be present).
+proptest = []
+
+[lib]
+path = "src/lib.rs"

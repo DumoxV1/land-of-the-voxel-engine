@@ -1,0 +1,180 @@
+{
+  "checked_at_utc": "2026-07-14T17:18:15.145493+00:00",
+  "inference_calls": 0,
+  "free_models": [
+    {
+      "id": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+      "context_length": 32768,
+      "tools": false,
+      "structured_outputs": true,
+      "expiration_date": "2026-07-19"
+    },
+    {
+      "id": "cohere/north-mini-code:free",
+      "context_length": 256000,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "google/gemma-4-26b-a4b-it:free",
+      "context_length": 262144,
+      "tools": true,
+      "structured_outputs": true,
+      "expiration_date": null
+    },
+    {
+      "id": "google/gemma-4-31b-it:free",
+      "context_length": 262144,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "google/lyria-3-clip-preview",
+      "context_length": 1048576,
+      "tools": false,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "google/lyria-3-pro-preview",
+      "context_length": 1048576,
+      "tools": false,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "meta-llama/llama-3.2-3b-instruct:free",
+      "context_length": 131072,
+      "tools": false,
+      "structured_outputs": false,
+      "expiration_date": "2026-07-19"
+    },
+    {
+      "id": "meta-llama/llama-3.3-70b-instruct:free",
+      "context_length": 131072,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": "2026-07-19"
+    },
+    {
+      "id": "nousresearch/hermes-3-llama-3.1-405b:free",
+      "context_length": 131072,
+      "tools": false,
+      "structured_outputs": false,
+      "expiration_date": "2026-07-19"
+    },
+    {
+      "id": "nvidia/nemotron-3-nano-30b-a3b:free",
+      "context_length": 256000,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "context_length": 256000,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "nvidia/nemotron-3-super-120b-a12b:free",
+      "context_length": 1000000,
+      "tools": true,
+      "structured_outputs": true,
+      "expiration_date": null
+    },
+    {
+      "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "context_length": 1000000,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "nvidia/nemotron-3.5-content-safety:free",
+      "context_length": 128000,
+      "tools": false,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "context_length": 128000,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "nvidia/nemotron-nano-9b-v2:free",
+      "context_length": 128000,
+      "tools": true,
+      "structured_outputs": true,
+      "expiration_date": null
+    },
+    {
+      "id": "openai/gpt-oss-20b:free",
+      "context_length": 131072,
+      "tools": true,
+      "structured_outputs": true,
+      "expiration_date": null
+    },
+    {
+      "id": "openrouter/free",
+      "context_length": 200000,
+      "tools": true,
+      "structured_outputs": true,
+      "expiration_date": null
+    },
+    {
+      "id": "poolside/laguna-m.1:free",
+      "context_length": 262144,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "poolside/laguna-xs-2.1:free",
+      "context_length": 262144,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": null
+    },
+    {
+      "id": "qwen/qwen3-coder:free",
+      "context_length": 1048576,
+      "tools": true,
+      "structured_outputs": false,
+      "expiration_date": "2026-07-19"
+    },
+    {
+      "id": "qwen/qwen3-next-80b-a3b-instruct:free",
+      "context_length": 262144,
+      "tools": true,
+      "structured_outputs": true,
+      "expiration_date": "2026-07-19"
+    },
+    {
+      "id": "tencent/hy3:free",
+      "context_length": 262144,
+      "tools": true,
+      "structured_outputs": true,
+      "expiration_date": "2026-07-21"
+    }
+  ],
+  "free_tool_model_count": 17,
+  "key": {
+    "label": "sk-or-v1-ae2...244",
+    "limit": 40,
+    "limit_remaining": 16.04455875,
+    "usage": 23.95544125,
+    "usage_daily": 23.95544125,
+    "usage_weekly": 23.95544125,
+    "usage_monthly": 23.95544125,
+    "is_free_tier": false
+  },
+  "key_limit_spent": 23.95544125,
+  "status": "BLOCKERS-ONLY"
+}
