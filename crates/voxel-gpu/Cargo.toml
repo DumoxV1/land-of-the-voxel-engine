@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-wgpu = "0.17"
+wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.27"
 image = "0.25"
@@ -13,6 +13,7 @@ env_logger = "0.11"
 log = "0.4"
 futures = "0.3"
 anyhow = "1"
+winit = "0.30"
 voxel-core = { path = "../voxel-core" }
 voxel-mesher = { path = "../voxel-mesher" }
 voxel-world = { path = "../voxel-world" }

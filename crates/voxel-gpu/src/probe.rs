@@ -1,8 +1,6 @@
 //! Feasibility probe: initialize wgpu on the host GPU, render a simple colored triangle
 //! offscreen, read the texture back, and save it as a PNG. If this runs, wgpu works on the
-//! target hardware and offscreen readback is viable for the voxel renderer.
-
-use std::sync::Arc;
+//! target hardware and offscreen readback is viable for the voxel renderer (wgpu 30 API).
 
 use wgpu::util::DeviceExt;
 
@@ -14,23 +12,25 @@ struct Vtx {
     color: [f32; 3],
 }
 
-/// Render a colored triangle offscreen and return the PNG bytes.
+/// Render a colored triangle offscreen and save it as a PNG at `path`.
 pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        #[cfg(not(target_arch = "wasm32"))]
         backends: wgpu::Backends::PRIMARY,
-        ..Default::default()
+        flags: wgpu::InstanceFlags::default(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::default(),
+        display: None,
     });
 
-    // Request an adapter (the GPU). Force Vulkan so we exercise the RTX 4080 path.
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         })
         .await
-        .ok_or_else(|| anyhow::anyhow!("no adapter found (GPU/Vulkan unavailable?)"))?;
+        .map_err(|e| anyhow::anyhow!("no adapter: {e:?}"))?;
 
     let info = adapter.get_info();
     log::info!(
@@ -44,11 +44,13 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
     let (device, queue) = adapter
         .request_device(
             &wgpu::DeviceDescriptor {
-                features: wgpu::Features::empty(),
-                limits: wgpu::Limits::downlevel_defaults(),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                memory_hints: wgpu::MemoryHints::default(),
+                experimental_features: wgpu::ExperimentalFeatures::default(),
                 label: None,
+                trace: wgpu::Trace::Off,
             },
-            None,
         )
         .await
         .map_err(|e| anyhow::anyhow!("no device: {e:?}"))?;
@@ -71,7 +73,6 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Shader: pass-through position, output color.
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("probe-shader"),
         source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(PROBE_WGSL)),
@@ -82,8 +83,9 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
         layout: None,
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: "vs_main",
-            buffers: &[wgpu::VertexBufferLayout {
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vtx>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
@@ -98,17 +100,23 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
                         shader_location: 1,
                     },
                 ],
-            }],
+            })],
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: "fs_main",
-            targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
-        multiview: None,
+        multiview_mask: None,
+        cache: None,
     });
 
     let verts = [
@@ -131,6 +139,7 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.05,
@@ -138,10 +147,13 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
                         b: 0.12,
                         a: 1.0,
                     }),
-                    store: true,
+                    store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, buf.slice(..));
@@ -150,8 +162,8 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
     queue.submit(Some(encoder.finish()));
 
     // Read back the texture and save to PNG.
-    let bytes_per_row = 512 * 4;
-    let buf_size = (bytes_per_row * 512) as u64;
+    let bytes_per_row = (512u32 * 4).next_multiple_of(256);
+    let buf_size = bytes_per_row as u64 * 512;
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("probe-readback"),
         size: buf_size,
@@ -162,17 +174,17 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
         label: Some("probe-readback-enc"),
     });
     enc2.copy_texture_to_buffer(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        wgpu::ImageCopyBuffer {
+        wgpu::TexelCopyBufferInfo {
             buffer: &staging,
-            layout: wgpu::ImageDataLayout {
+            layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(bytes_per_row as u32),
+                bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(512),
             },
         },
@@ -181,9 +193,15 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
     queue.submit(Some(enc2.finish()));
 
     let slice = staging.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::Maintain::Wait);
-    let data = slice.get_mapped_range();
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |res| {
+        let _ = tx.send(res);
+    });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv()
+        .map_err(|_| anyhow::anyhow!("map channel closed"))?
+        .map_err(|e| anyhow::anyhow!("map failed: {e:?}"))?;
+    let data = slice.get_mapped_range()?;
     let mut img = image::RgbaImage::new(512, 512);
     for y in 0..512 {
         for x in 0..512 {
@@ -223,7 +241,3 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color, 1.0);
 }
 "#;
-
-// `Arc` import kept for parity with later real renderer; silence unused warning in probe.
-#[allow(dead_code)]
-fn _use_arc(_: Arc<()>) {}
