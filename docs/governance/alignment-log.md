@@ -196,3 +196,25 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - S-12 deel 1 = Fase-2b #1 uit roadmap: `World::material_at(&mut self, WorldVoxel) -> MaterialId` toegevoegd (geen chunk-clone); `voxel-player::solid_at` gebruikt nu die reader i.p.v. `get_or_generate().get()` (audit #12: 32 KB-clone per voxel-sample in collision). Strict TDD: failing test eerst (RED: `material_at` bestond niet), daarna GREEN. 58/58 tests groen.
 - Terugstap-check (na 3e stap): géén drift vs canoniek plan; roadmap/noordster ongewijzigd; geen architectuurwijziging. Commit d8e34cc op origin/main.
 - Volgende: wacht wgpu/winit-onderzoek af, dan Fase 2a upgrade-plan schrijven (wgpu>=22 + winit 0.30 ApplicationHandler) onder TDD.
+
+## 2026-07-15 (sessie 3) — S-12 deel 2 (Fase 2a wgpu/winit-upgrade)
+- Bronnen: crates.io live API (wgpu laatst stabiel = 30.0.0, winit = 0.30.13; 0.31 is beta),
+  lokaal gekloonde wgpu-30 broncode voor exacte signatures. Migratieplan subagent was op
+  0.22-0.24 gebaseerd -> 0.17->30 is 13 major-versies, dus dieper dan het plan dekte.
+- Wijzigingen (alleen voxel-gpu):
+  - Cargo.toml: wgpu "0.17"->"30", winit "0.30" toegevoegd.
+  - renderer.rs: InstanceDescriptor(5 velden), request_adapter->Result, request_device(1 arg),
+    PollType::wait_indefinitely, TexelCopy* structs, StoreOp::Store, VertexState Option-wrap +
+    compilation_options, bind_group_layouts: &[Some(&bgl)], immediate_size, DepthStencilState
+    Option<>, multiview_mask + cache, @interpolate(flat) WGSL.
+  - NIEUW example gpu_window: ApplicationHandler-event-loop, surface-render, WASD+muis-look
+    free-fly camera; deelt GpuScene-pipeline met offscreen-pad.
+  - KRITIEKE FIX: GpuScene::new_for_surface nam eigen device (surface/device mismatch ->
+    "DeviceId bestaat niet" panic). Nu device/queue van dezelfde adapter als surface.
+  - DPI-clip: surface binnen 2048px (RTX 4080 + ~3x scale -> 3048px -> Surface::configure panic).
+- Verificatie: cargo build --workspace --examples 0 errors; cargo test 58/58 groen (ongewijzigd);
+  gpu_world offscreen PNG intact (16.270 tris, visueel OK); gpu_window startup-log bevestigd
+  ("GPU scene initialized (Bgra8UnormSrgb)"), 12s runtime zonder crash.
+- Commit 9bc1fa0 -> origin/main. Geen drift vs plan; Fase 2a voltooid.
+- Volgende: Fase-2 benchmark-gate (B-06/B-07/FPS op 1 km²) vóór ADR-0004 lock-in, dan
+  chunk-streaming (S-12 deel 3).

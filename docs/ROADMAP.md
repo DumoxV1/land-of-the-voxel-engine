@@ -7,7 +7,8 @@ rijke werelddichtheid, dynamiek en schaal, zónder beschermde assets/personages 
 **Status (2026-07-15):** S-01..S-11 voltooid. S-11 = audit-hardening: onafhankelijke code-audit
 (6 hoge + 13 middel bevindingen) → alle hoge bevindingen gefixt onder strict TDD (57 tests groen).
 De engine rendert op de GPU (wgpu, RTX 4080) mét backface-culling en correcte geometrie.
-Onderzoeksadvies vervolg: `docs/research/2026-07-15-sota-advies-vervolg.md` (bron-onderbouwd).
+**S-12 deel 1** (clone-fix, 58/58 tests) en **S-12 deel 2** (Fase 2a: wgpu 0.17→30 + winit 0.30
+interactieve client) zijn af. Onderzoeksadvies vervolg: `docs/research/2026-07-15-sota-advies-vervolg.md`.
 
 ---
 
@@ -25,6 +26,8 @@ Onderzoeksadvies vervolg: `docs/research/2026-07-15-sota-advies-vervolg.md` (bro
 | S-09 | voxel-server | headless authoritative server (World + EditLog + spelers), geen GPU | 4 tests, headless_server example |
 | S-10 | **voxel-gpu** | **wgpu GPU-renderer** (greedy_mesh → GPU, WGSL shading, backface-culling) | gpu_world.png, probe.png |
 | S-11 | (alle) | **audit-hardening**: mesher-vlakken op juiste planes + CCW-winding, serialize v3 (i64-coords, nibble-validatie), player terminal-velocity + footprint-floor-resolve, deterministische tick-volgorde, atomaire saves, gpu-kleuren/fog/backends gefixt | 9 nieuwe tests (RED→GREEN), 57 totaal |
+| S-12a | voxel-world | **clone-fix (audit #12)**: `World::material_at` zonder chunk-clone; player collision gebruikt cheap reader (geen 32KB-clone per voxel-sample) | 1 test, 58 totaal |
+| S-12b | **voxel-gpu** | **Fase 2a**: wgpu 0.17→30 + winit 0.30 interactieve client — `gpu_window` example (ApplicationHandler, surface-render, WASD+muis-look), gedeelde pipeline met offscreen-pad | gpu_window draait op GPU, gpu_world PNG intact (16.270 tris) |
 
 **Architectuurprincipes (ADR's):** renderer-agnostische core (ADR-0002), server-authority +
 determinisme + versieerbare data + sparse/procedurele wereld (ADR-0003), client-shell = Rust +
@@ -34,13 +37,15 @@ Bevy/wgpu (ADR-0004, status Proposed).
 
 ## Routekaart (fasen)
 
-### Fase 2 — GPU-client shell (BEZIG, S-10/S-11 gedaan als opmaat)
+### Fase 2 — GPU-client shell (BEZIG, S-10/S-11/S-12b gedaan)
 - [x] S-10: offscreen wgpu-renderer bewijst GPU-pad op RTX 4080.
 - [x] S-11: audit-hardening (geometrie, robustheid, determinisme, physics) — zie tabel.
-- [ ] **wgpu/winit-upgrade**: wgpu 0.17 → recent (≥22) + winit 0.30 `ApplicationHandler`-
-      patroon vóór de interactieve client (advies #1; oude API's zijn dood spoor).
-- [ ] **Interactieve GPU-client**: winit-venster + render-loop + camera-input (WASD + muis).
-      Vervang offscreen-PNG door een live venster dat de `World` rendert.
+- [x] **S-12b (Fase 2a): wgpu 0.17 → 30 + winit 0.30** `ApplicationHandler`-patroon. Nieuw
+      `gpu_window` example: live venster, WASD+muis-look free-fly camera, gedeelde pipeline
+      met offscreen-pad. Geverifieerd: "GPU scene initialized (Bgra8UnormSrgb)".
+- [x] **Interactieve GPU-client**: winit-venster + render-loop + camera-input (WASD + muis).
+      Vervangt offscreen-PNG door een live venster dat de `World` rendert (S-12b).
+- [ ] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
 - [ ] Chunk-streaming (advies #2): dedicated rayon-pool + kanalen, afstand-geprioriteerde
       queue met generation-counters, upload-budget per frame, buffer-pooling.
       Chunk-key alvast `(x, y, z, lod)` zodat LOD later geen herschrijf vergt (advies #5).
