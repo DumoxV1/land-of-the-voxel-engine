@@ -178,13 +178,12 @@ fn collides(world: &mut World, pos: &[f32; 3]) -> bool {
     false
 }
 
-/// Read solidity (non-air) at a world voxel without panicking on missing chunks.
+/// Read solidity (non-air) at a world voxel without cloning a whole chunk (S-12 fix:
+/// was `get_or_generate(...).get(...)`, which cloned a 32 KB chunk per sample during
+/// collision; now uses the cheap `material_at` reader from voxel-world).
 fn solid_at(world: &mut World, x: i64, y: i64, z: i64) -> bool {
     let wv = WorldVoxel::new(x, y, z);
-    let coord = voxel_core::coords::ChunkCoord::from_world(wv);
-    let local = voxel_core::coords::LocalVoxel::from_world(wv);
-    let chunk = world.get_or_generate(coord);
-    chunk.get(local) != MaterialId::from(0)
+    world.material_at(wv) != MaterialId::from(0)
 }
 
 /// Rest the player's center on top of the highest solid voxel below the feet.

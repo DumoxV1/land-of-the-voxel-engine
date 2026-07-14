@@ -51,6 +51,23 @@ impl World {
         self.get_or_generate(coord)
     }
 
+    /// Read the material at a world position without returning an owned `Chunk`.
+    ///
+    /// Unlike `get_or_generate` (which clones the whole chunk), this returns just the
+    /// material id — cheap enough to call per voxel during collision/physics sampling
+    /// (audit #12: the clone previously cost 32 KB per sample). Generates the chunk from
+    /// the seed on a cache miss (so it is identical to `get_or_generate` for untouched
+    /// coords) but only hands back the single voxel's material.
+    pub fn material_at(&mut self, world: WorldVoxel) -> MaterialId {
+        let coord = ChunkCoord::from_world(world);
+        let local = LocalVoxel::from_world(world);
+        let chunk = self
+            .chunks
+            .entry(coord)
+            .or_insert_with(|| generate_chunk(coord, self.seed));
+        chunk.get(local)
+    }
+
     /// Write a voxel at a world position into the owning chunk, marking that chunk dirty.
     pub fn set_voxel(&mut self, world: WorldVoxel, material: MaterialId) {
         let coord = ChunkCoord::from_world(world);
