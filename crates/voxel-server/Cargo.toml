@@ -1,0 +1,11 @@
+[package]
+name = "voxel-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voxel-core = { path = "../voxel-core" }
+voxel-world = { path = "../voxel-world" }
+voxel-edit = { path = "../voxel-edit" }
+voxel-player = { path = "../voxel-player" }
