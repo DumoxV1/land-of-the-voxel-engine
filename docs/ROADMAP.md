@@ -63,6 +63,15 @@ Bevy/wgpu (ADR-0004, status Proposed).
       Onderzoek (3 subagents) bevestigt P0+P1 ≈ 10–30× potentieel; P0 `write_buffer`
       kan nog ~25 ms spike geven (wgpu#1242) → vervolg: staging-ring + `copy_buffer_to_buffer`.
       Advies #2/#3 uit SOTA-onderzoek gevolgd.
+- [x] **Mijlpaal 3 (P3, 2026-07-15): non-blocking rayon-meshing**. Render-thread mest/chunkt
+      niet meer synchroon: een dedicated `rayon::ThreadPool` (1 core vrij voor render) doet
+      `generate_chunk` + `greedy_mesh` off-thread, stuurt kant-en-klare `Vec<Triangle>` terug
+      via `crossbeam_channel` met een `generation` counter. `render_frame` vult `mesh_cache`
+      uit de channel binnen een per-frame `UPLOAD_BUDGET` (4) en discardt stale results
+      (camera-beweging → gen+1 → oude in-flight result weg). Strict TDD: unit-test
+      `mesh_chunk_offthread_streams_result` (Rood→Groen). **62/62 tests groen.** Plan in
+      `docs/milestone3-rayon-meshing.md`; afgeleid uit 3e subagent-onderzoek. Volgende:
+      Mijlpaal 4 = 4K-texture-system (texture-arrays + PBR + triplanar, wgpu 0.30).
 - [x] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
       **S-12c deel 1 GEDAAN (2026-07-15):** GPU-benchmark-harness (`examples/gpu_bench.rs` +
       `GpuScene::render_triangles` offscreen-pad) meet FPS op 1 km² (1024 chunks, RTX 4080).

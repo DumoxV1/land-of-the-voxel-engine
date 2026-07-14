@@ -282,12 +282,18 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
   (frustum-culling) = ~3–10×, P0+P1 samen ~10–30×.
 - **Mijlpaal 2 (lag fix P0+P1):** `Frustum`-struct in `renderer.rs` (6 planes uit view_proj,
   AABB-test) + unit-test (Rood→Groen). GPU buffer-pooling: één herbruikbare VBO in `GpuScene`,
-  `write_buffer` i.p.v. per-frame `create_buffer_init`, groeit alleen bij noodzaak. Client
-  `gpu_window` past frustum-culling per chunk toe. Regressie: 61/61 tests groen (60+1 nieuw).
-  Bench 1 km²: **8,8 → 15,8 avg FPS** (p50 129→55 ms = 2,3×). Benchmark-doc + ROADMAP bijgewerkt.
-- **Niet gedaan (wel gepland):** P3 rayon-meshing (non-blocking), P2 distance/triangle-budget,
-  staging-ring i.p.v. `write_buffer` (wgpu#1242 ~25 ms spike), Mijlpaal 3 = 4K-texture-system
-  (texture-arrays + PBR + triplanar op wgpu 0.30). Die volgen als aparte mijlpalen.
+  `write_buffer` i.p.v. per-frame `create_buffer_init`. Client past frustum-culling per chunk toe.
+  **61/61 tests groen** (60+1 nieuw). Bench 1 km²: **8,8 → 15,8 avg FPS** (p50 129→55 ms = 2,3×).
+- **Mijlpaal 3 (P3, non-blocking rayon-meshing):** dedicated `rayon::ThreadPool` (1 core vrij)
+  doet `generate_chunk`+`greedy_mesh` off-thread; `crossbeam_channel` stuurt kant-en-klare
+  `Vec<Triangle>` + `generation` terug; `render_frame` vult `mesh_cache` binnen per-frame
+  `UPLOAD_BUDGET` (4), discardt stale via gen-counter. Strict TDD: unit-test
+  `mesh_chunk_offthread_streams_result` (Rood→Groen). **62/62 tests groen** (60+2 nieuw).
+  Plan in docs/research/2026-07-15-milestone3-rayon-meshing.md.
+- **Niet gedaan (wel gepland):** staging-ring i.p.v. `write_buffer` (wgpu#1242 ~25 ms spike),
+  P2 distance/triangle-budget, Mijlpaal 4 = 4K-texture-system (texture-arrays + PBR + triplanar
+  op wgpu 0.30, zie onderzoek docs/research/2026-07-15-texture-4k-aanbeveling.md). Die volgen als
+  aparte mijlpalen.
 - Geen drift vs canoniek plan/roadmap. Code niet versoepeld ondanks complexiteit.
 - Commit + push naar origin main (grens A) volgt.
 

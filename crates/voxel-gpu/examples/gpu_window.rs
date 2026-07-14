@@ -5,7 +5,7 @@
 //!
 //! Run with: cargo run --release --example gpu_window -p voxel-gpu
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
@@ -15,23 +15,31 @@ use winit::window::{Window, WindowAttributes};
 
 use voxel_core::coords::{ChunkCoord, CHUNK_SIZE};
 use voxel_gpu::renderer::{GpuCamera, GpuScene};
-use voxel_mesher::greedy_mesh;
+use voxel_gpu::{mesh_pool, MeshResult};
 use voxel_mesher::Triangle;
 use voxel_world::World;
 
 /// View distance in chunks. On the 12.5 cm scale a 4 m chunk -> 32 chunks ~= 128 m view.
 const CHUNK_M: f32 = CHUNK_SIZE as f32 * 0.125; // 4 m (ADR-0005)
 const VIEW_RADIUS: i64 = 24; // ~96 m view radius
+/// Max chunks whose meshes we ingest from the worker channel per frame (P3 upload budget).
+const UPLOAD_BUDGET: usize = 4;
 
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
     scene: Option<GpuScene>,
     world: World,
+    seed: u32,
     mesh_cache: HashMap<ChunkCoord, Vec<Triangle>>,
+    mesh_pool: rayon::ThreadPool,
+    mesh_tx: crossbeam_channel::Sender<MeshResult>,
+    mesh_rx: crossbeam_channel::Receiver<MeshResult>,
+    requested_gen: HashMap<ChunkCoord, u64>,
+    pending: HashSet<ChunkCoord>,
     camera: GpuCamera,
     // Input state.
-    keys: std::collections::HashSet<winit::keyboard::PhysicalKey>,
+    keys: HashSet<winit::keyboard::PhysicalKey>,
     yaw: f32,
     pitch: f32,
     // Mouse-look drag state.
@@ -46,15 +54,23 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let seed = 7u32;
+        let (mesh_tx, mesh_rx) = crossbeam_channel::unbounded::<MeshResult>();
         Self {
             window: None,
             surface: None,
             scene: None,
-            world: World::new(7),
+            world: World::new(seed),
+            seed,
             mesh_cache: HashMap::new(),
+            mesh_pool: mesh_pool(),
+            mesh_tx,
+            mesh_rx,
+            requested_gen: HashMap::new(),
+            pending: HashSet::new(),
             // First-person spawn: eye height set after we know the terrain in resumed().
             camera: GpuCamera::new([40.0, 50.0, 40.0], -std::f32::consts::FRAC_PI_2, -0.4, 1.0),
-            keys: std::collections::HashSet::new(),
+            keys: HashSet::new(),
             yaw: -std::f32::consts::FRAC_PI_2,
             pitch: -0.4,
             dragging: false,
@@ -321,7 +337,25 @@ impl App {
         let half = CHUNK_M * 0.5; // 2 m half-extent (x/z)
         let half_y = CHUNK_M * 1.5; // terrain is <= ~1 chunk tall, pad for height
 
-        // --- Chunk-streaming: gather visible chunks within VIEW_RADIUS of the camera ---
+        // --- (P3) Drain finished meshes from the worker channel (bounded per-frame budget,
+        //     stale results dropped via generation counter). Non-blocking: the render thread
+        //     never generates/meshes a chunk itself.
+        let mut budget = UPLOAD_BUDGET;
+        while budget > 0 {
+            let r = match self.mesh_rx.try_recv() {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            budget -= 1;
+            // Discard if a newer request superseded this one (camera moved away/back).
+            if self.requested_gen.get(&r.coord).copied() != Some(r.gen) {
+                continue;
+            }
+            self.mesh_cache.insert(r.coord, r.tris);
+            self.pending.remove(&r.coord);
+        }
+
+        // --- Chunk-streaming: draw visible chunks; request missing ones off-thread. ---
         let [ex, _ey, ez] = self.camera.eye;
         let ccx = (ex / CHUNK_M).floor() as i64;
         let ccz = (ez / CHUNK_M).floor() as i64;
@@ -343,11 +377,24 @@ impl App {
                     continue;
                 }
                 let coord = ChunkCoord::new(cx, 0, cz);
-                let entry = self.mesh_cache.entry(coord).or_insert_with(|| {
-                    let chunk = self.world.get_or_generate(coord);
-                    greedy_mesh(&chunk)
-                });
-                tris.extend_from_slice(entry);
+                if let Some(m) = self.mesh_cache.get(&coord) {
+                    tris.extend_from_slice(m); // ready: draw (frustum-cull intact)
+                } else if !self.pending.contains(&coord) {
+                    // Not ready and not yet requested: spawn off-thread generate+mesh.
+                    let g = self.requested_gen.entry(coord).or_insert(0);
+                    *g += 1;
+                    let gen = *g;
+                    self.pending.insert(coord);
+                    let tx = self.mesh_tx.clone();
+                    let seed = self.seed;
+                    self.mesh_pool.spawn(move || {
+                        // CPU-only: pure worldgen + meshing, never touches the GPU.
+                        let chunk = voxel_worldgen::generate_chunk(coord, seed);
+                        let tris = voxel_mesher::greedy_mesh(&chunk);
+                        let _ = tx.send(MeshResult { coord, gen, tris });
+                    });
+                }
+                // else: pending, not ready yet -> skipped this frame, pops in later.
             }
         }
         if tris.is_empty() {
