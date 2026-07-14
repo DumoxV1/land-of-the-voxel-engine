@@ -75,18 +75,25 @@ Als de sessie wordt gereset/vernieuwd, geef dan door (of lees zelf uit de repo):
 
 1. CANONIEKE BRONNEN (altijd eerst lezen):
    - .hermes/plans/2026-07-14_181851-onderzoek-en-aanpak-voxel-engine.md
-   - .hermes/PROJECT_STATE.md  (nu t/m S-10)
-   - docs/governance/alignment-log.md  (t/m S-10 entry)
-   - docs/ROADMAP.md  (fasen 2-6)
+   - .hermes/PROJECT_STATE.md  (nu t/m S-11)
+   - docs/governance/alignment-log.md  (t/m S-11 entry)
+   - docs/ROADMAP.md  (fasen 2-6 + Fase 2b tech-schuld + workflow-lessen)
+   - docs/research/2026-07-15-sota-advies-vervolg.md  (bron-onderbouwd SOTA-advies)
    - docs/architecture/adr/0001..0004
 
 2. HUIDIGE STAAT:
-   - Branch master -> origin/main. Laatste commit: e3e9ee9 (routekaart), 2fe4548 (S-10 GPU).
+   - Branch master -> origin/main. Laatste commits: S-11 audit-hardening + roadmap-update
+     (na 2fe4548 S-10 GPU). `git log --oneline -6` voor exacte hashes.
    - Werkdirectory: C:\Users\keere\Desktop\Land of the Voxel Engine
    - 10 crates: voxel-core, voxel-mesher, voxel-render (software-raster), voxel-worldgen,
      voxel-world, voxel-edit, voxel-persist, voxel-player, voxel-server, voxel-gpu (wgpu).
-   - Tests: cargo test --workspace = groen (30 "ok"-regels).
-   - GPU bewezen: voxel-gpu rendert terrain op RTX 4080 via Vulkan (gpu_world.png, probe.png).
+   - Tests: cargo test --workspace = 57/57 groen (incl. 9 s11_audit-tests).
+   - GPU bewezen: voxel-gpu rendert terrain op RTX 4080 (gpu_world.png, probe.png),
+     nu mét backface-culling (mesher levert CCW-winding + correcte vlakposities).
+   - S-11 fixte: mesher face-planes (+vlakken op d+1) & winding, chunk-serialize v3
+     (i64 coords + nibble-validatie), player terminal velocity + footprint floor-resolve,
+     server gesorteerde tick-volgorde, gpu grass/dirt-tint + fog-vanaf-eye +
+     Backends::PRIMARY, persist atomair schrijven (tmp+rename).
 
 3. BELANGRIJKE TECHNISCHE FEITEN (voorkom herontdekking):
    - wgpu gepind op 0.17.2 (0.18.0 yanked; 0.19/0.20 API-drift). Bij upgrade: lees de
@@ -99,11 +106,16 @@ Als de sessie wordt gereset/vernieuwd, geef dan door (of lees zelf uit de repo):
    - .gitignore bevat Cargo.lock (bestaande conventie; niet wijzigen zonder overleg).
    - openrouter-latest.json is runtime — NOOIT committen.
 
-4. VOLGENDE AUTONOME STAP (Fase 2):
-   - Interactieve GPU-client: winit-venster + render-loop + camera-input (WASD + muis) in
-     voxel-gpu, die de World rendert i.p.v. offscreen-PNG.
-   - Daarna chunk-streaming + spelercontroller aan GPU-camera koppelen.
-   - Daarna Fase-2 benchmark-gate (B-06/B-07/FPS op 1 km²) vóór ADR-0004 lock-in.
+4. VOLGENDE AUTONOME STAP (Fase 2, volgorde uit ROADMAP "Directe volgende stap"):
+   a. wgpu/winit-upgrade: wgpu 0.17.2 -> recent (>=22) + winit 0.30 ApplicationHandler-
+      patroon. Lees docs.rs van de gekozen versie eerst; verwacht API-drift (zie feiten
+      hierboven, die gelden voor 0.17!).
+   b. Interactieve GPU-client: winit-venster + render-loop + WASD/muis-camera in voxel-gpu.
+      Doe tegelijk Fase-2b #1: World::get/material_at zonder chunk-clone (perf-lek in
+      collision; anders vertekent de FPS-benchmark).
+   c. Chunk-streaming (rayon-pool + kanalen, afstand-prioriteit, upload-budget per frame);
+      chunk-key alvast (x,y,z,lod).
+   d. Fase-2 benchmark-gate (B-06/B-07/FPS op 1 km²) vóór ADR-0004 lock-in.
 
 5. GEBRUIKERSCONTEXT:
    - Gebruiker is niet-technisch, geeft volledige autonomie, communiceert in het Nederlands,
