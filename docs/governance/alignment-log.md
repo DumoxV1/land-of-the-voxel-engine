@@ -180,3 +180,12 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - Verificatie: `cargo test --workspace` groen (incl. voxel-gpu). `gpu_world.png` visueel geverifieerd (vision-tool): "3D voxel terrain, shaded hills/surfaces with depth, warm lighting, earthy green/brown voxels, fog". `probe.png` eveneens geverifieerd.
 - Volgende (Fase 4, autonoom): winit-venster + input-loop (interactieve GPU-client), dan netwerk/protocol (2–8p multiplayer) bovenop de headless server, dan echte Bevy/wgpu-integratie + Fase-2 benchmark-gate (B-06/B-07/FPS) vóór ADR-0004 lock-in.
 - Commit + push naar origin main (grens A) volgt.
+
+## 2026-07-15 — S-11 audit-hardening + roadmap-verfijning (terugstapcontrole na 3e stap)
+- Aanleiding: gebruikersopdracht "controleer de gehele engine + repo, doe onderzoek naar vervolg, verbeter roadmap en workflows".
+- Verificatie vooraf: cargo test --workspace 48/48 groen; headless_server (600 ticks) + gpu_world (16.270 tris) echt gedraaid; gpu_world.png visueel gecontroleerd; Python-guards 3/3 OK.
+- Repo-hygiëne: `.hermes/reports/` uit git (runtime-artifacts), clippy --fix toegepast (commit 7547f7e).
+- Onafhankelijke audit (gratis model) + SOTA-onderzoek parallel gedelegeerd (deleg_b5c57770). Alle 6 hoge bevindingen door implementer in de bron geverifieerd — géén enkele claim blind overgenomen; alle bleken correct.
+- S-11 fixes onder strict TDD (9 nieuwe tests RED→GREEN; workspace 57/57): mesher-planes/winding (+culling aan), serialize v3 (i64, nibble-validatie), player anti-tunneling + footprint-floor, server tick-orde-determinisme, atomaire saves, gpu-tints/fog/backends. Commit 1a8e093.
+- Plan-alignment: canoniek plan ongewijzigd van koers (vertical slice → interactieve client → gates). ROADMAP.md geconcretiseerd met bron-onderbouwd advies (docs/research/2026-07-15-sota-advies-vervolg.md): wgpu/winit-upgrade vóór interactieve client, binary greedy meshing, chunk-key (x,y,z,lod), AO+CSM in Fase 3, Gaffer-netcode in Fase 4, LOD-beslissing data-gedreven na 1 km²-benchmark. Fase 2b (technische schuld) toegevoegd.
+- Workflow-les (vastgelegd in ROADMAP.md): count-based tests misten de 2 ernstigste bugs; voortaan golden-tests op exacte waarden + malformed-input tests per spike; onafhankelijke audit na elke fase.
