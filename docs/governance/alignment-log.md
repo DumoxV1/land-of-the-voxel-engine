@@ -49,3 +49,26 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - Traceability-matrix aangemaakt: `docs/research/traceability-matrix.md` (Plan → Claim → Bron → Spike).
 - Drie ADR's gesynthetiseerd van uitsluitend geverifieerde bevindingen: `adr/0001-voxel-representation.md`, `adr/0002-renderer-agnostic-core.md`, `adr/0003-multiplayer-target.md`.
 - Status: researchreview + plansynthese VOLTOOID; engine-startgate geopend voor S-01 (voxel-core) onder strict TDD.
+
+## 2026-07-14 — verplichte terugstap na uitvoeringsstappen + S-01 TDD-afronding
+- Eén stap terug: alle 8 blocking findings (B-01…B-08) opnieuw geverifieerd tegen de memo's op schijf — allemaal toegepast.
+- ADR's 0001–0003 en traceability-matrix aanwezig en gegenereerd van uitsluitend geverifieerde claims.
+- Plan-alignment-check: OK (canoniek plan + governancebestanden aanwezig).
+- `cargo test -p voxel-core --features proptest`: 7/7 groen (5 integratie + 1 property + 1 lib-unit). Rode fase aantoonbaar vóór groene fase (strict TDD).
+- `cargo build -p voxel-core`: OK; geen godot/bevy/wgpu import of dependency (ADR-0002 renderer-agnostisch bevestigd).
+- Project guard suite: 3/3 groen.
+- Budgetguard: project-key spent $27,5299 (drempel €22 gepasseerd, €30 nog niet). Geen betaalde calls deze sessie; alles via lokale tools + gratis `:free`. Paid blijft dicht.
+- Git-repo geïnitialiseerd; lokale commit e6cb818 (geen push — conform aanbevolen grens A van blocked USER INPUT-kaart t_b624d2cb).
+- Planstatus: aligned. Volgende stap: S-01 hardening (dense/palette chunk states) of S-02 mesher-spike na goedkeuring.
+
+## 2026-07-14 — S-02 mesher-spike voltooid (strict TDD) + verplichte terugstap na uitvoeringsstap 3
+- Kanban USER INPUT-kaart t_b624d2cb gesloten (optie A gekozen); autonome besluitvorming gedelegeerd aan Hermes + eigen onderzoek. Grens A: lokaal commit/push naar eigen repo zonder vragen; publicatie/release/paid-top-up/destructieve git blijft goedkeuringsplichtig.
+- Keuze (autonoom): S-02 mesher-spike boven S-01-hardening — logische volgende bewijslaag na coördinaat/chunk-kern.
+- Strict TDD: eerst failing tests (`tests/spike_s02.rs`) gecommit in rode fase (API bestond niet → compileerfout), daarna implementatie in `src/lib.rs` (naive → culled → greedy).
+- Rode fase aantoonbaar: `cargo test -p voxel-mesher` faalde met "cannot find function `naive_mesh`".
+- Groene fase: `cargo test -p voxel-mesher` → 6/6 groen. Hele workspace: voxel-core 6 + voxel-mesher 6 = 12 tests groen.
+- Acceptance criteria S-02 vervuld: (a) culling verwijdert interne faces (culled << naive voor solide blok); (b) greedy ≤ 1,5× culled triangle-count; (c) waterdicht — geverifieerd via oppervlakte (6·N² voor volle chunk, 6·N²+6·(N-2)² voor holle shell van dikte 1); (d) geen renderer-dep/godot/bevy/wgpu (ADR-0002 bevestigd).
+- Correctie tijdens TDD: eerste test-verwachtingen waren fout (onderstelden ten onrechte 6 vlakken voor holle shell en 0 blootgestelde faces voor volle chunk). Tests herschreven naar echte geometrie; mesher-code was correct.
+- Verplichte terugstap: plan-alignment OK, project guard suite 3/3 groen, workspace-tests groen, budgetguard project-key spent $27,5299 (paid blijft dicht). Geen drift t.o.v. canoniek plan.
+- Commit + push naar origin main (grens A): S-02 tracer-bullet plan, voxel-mesher crate, alignment-log update.
+- Planstatus: aligned. Volgende stap: S-01-hardening (dense/palette chunk states) of S-03 (renderer/camera spike) — keuze autonoom volgende sessie.

@@ -1,5 +1,5 @@
 {
-  "checked_at_utc": "2026-07-14T17:18:15.145493+00:00",
+  "checked_at_utc": "2026-07-14T18:08:51.845037+00:00",
   "inference_calls": 0,
   "free_models": [
     {
@@ -168,13 +168,13 @@
   "key": {
     "label": "sk-or-v1-ae2...244",
     "limit": 40,
-    "limit_remaining": 16.04455875,
-    "usage": 23.95544125,
-    "usage_daily": 23.95544125,
-    "usage_weekly": 23.95544125,
-    "usage_monthly": 23.95544125,
+    "limit_remaining": 12.47013575,
+    "usage": 27.52986425,
+    "usage_daily": 27.52986425,
+    "usage_weekly": 27.52986425,
+    "usage_monthly": 27.52986425,
     "is_free_tier": false
   },
-  "key_limit_spent": 23.95544125,
+  "key_limit_spent": 27.52986425,
   "status": "BLOCKERS-ONLY"
 }
