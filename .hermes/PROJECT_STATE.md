@@ -2,47 +2,49 @@
 
 **Canoniek plan:** `.hermes/plans/2026-07-14_181851-onderzoek-en-aanpak-voxel-engine.md`  
 **Status:** researchreview en plansynthese actief  
-**Actieve fase:** Fase 0 — productdefinitie, meetlat en governance  
-**Laatste update:** 2026-07-14
+**Actieve fase:** Fase 2 — GPU-client shell (S-10/S-11/S-12a/S-12b gereed; volgende: Fase-2 benchmark-gate vóór ADR-0004 lock-in)  
+**Laatste update:** 2026-07-15
 
 ## North star
-Een filmische, zeer rijke en dynamische openwereld-RPG op een eigen micro-voxelfundament — ambitieus als “de GTA VI / Crimson Desert onder micro-voxel-engines”, maar ontwikkeld via meetbare technische gates.
+Een filmische, zeer rijke en dynamische openwereld-RPG op een eigen micro-voxelfundament — ambitieus als "de GTA VI / Crimson Desert onder micro-voxel-engines", maar ontwikkeld via meetbare technische gates.
 
 ## Huidige beslissingen
 - Geen volledige MMO in de eerste twaalf weken; eerst een vertical slice.
 - Procedurele basiswereld + sparse persistente wijzigingen.
 - Eigen voxel/world/network/persistence-kern; commodity-platformfuncties mogen uit open source komen.
-- Blocky versus smooth en clientshell worden beslist via gelijke benchmarks, niet voorkeur.
+- Blocky versus smooth en clientshell worden beslist via gelijke benchmarks, niet voorkeur (client-shell = Rust+Bevy/wgpu per ADR-0004, status Proposed, lock-in pas na Fase-2 benchmark-gate).
 - Gratis OpenRouter-modellen zijn standaard voor research en eerste reviews.
 
 ## Werkprotocol
 Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontroleerd en wordt plan-alignment expliciet vastgelegd in `docs/governance/alignment-log.md`.
 
-**Status:** researchreview en plansynthese VOLTOOID  \
-**Actieve fase:** Fase 0 → engine-startgate GEOPEND (S-01..S-07 onder strict TDD: voxel-core, hardening, mesher, software-raster, worldgen, world-store, edit-tool, persist)  \
+**Status:** researchreview en plansynthese VOLTOOID  
+**Actieve fase:** Fase 2 — GPU-client shell (interactieve wgpu-client draait op RTX 4080; Fase-2 benchmark-gate is de volgende harde gate vóór ADR-0004 lock-in)  
 **Laatste update:** 2026-07-15
 
-## Volgende gates
+## Voltooide gates & spikes (strict TDD)
 1. ✅ Onafhankelijke gratis reviewer corrigeerde bewijs, licenties, verzonnen/ongeverifieerde metrics en scope (review-initial-bundle.md, B-01…B-08).
 2. ✅ Gratis architect synthetiseerde uitsluitend geverifieerde resultaten naar ADR-spikes (adr/0001–0003) en planupdates.
-3. ✅ Exact implementatieplan voor de eerste `voxel-core` tracer bullet (S-01) geschreven (zie `.hermes/plans/spike-s01-voxel-core.md`).
+3. ✅ Exact implementatieplan voor de eerste `voxel-core` tracer bullet (S-01) geschreven.
 4. ✅ S-01 onder strict TDD: failing tests eerst (rood), dan implementatie (groen). Repo scaffold + `voxel-core` crate.
-5. ✅ S-01-hardening: drie chunk-states (`Uniform`/`PalettePacked`/`Dense`) + 4-bit bitpacking + per-chunk palette (≤16), byte-stabiel versie-2 formaat. 7 nieuwe failing tests → groen.
-6. ✅ S-01-hardening: drie chunk-states (`Uniform`/`PalettePacked`/`Dense`) + 4-bit bitpacking + per-chunk palette (≤16), byte-stabiel versie-2 formaat. 7 nieuwe failing tests → groen.
-7. ✅ S-03 software-raster spike: `voxel-render` crate, `Camera` (perspectief) + `render_scene` (z-buffer, per-normaal shading) → PNG. 3 failing tests → groen; demo-PNG gegenereerd en visueel geverifieerd (voxel-scène herkenbaar). Geen GPU/renderer-dep in core-crates (ADR-0002).
-8. ✅ S-04 deterministische worldgen spike: `voxel-worldgen` crate, `generate_chunk(coord, seed)` (seeded value-noise heightmap, grass/dirt/stone lagen). 5 failing tests → groen (determinisme, seed-verschil, chunk-grenscontinuïteit, niet-leeg, laagstructuur). demo_worldgen.png visueel geverifieerd als rollende, scheurvrije terrain. Renderer-agnostisch (alleen voxel-core).
-9. ✅ S-05 multi-chunk world-store spike: `voxel-world` crate, `World` (HashMap cache + seed-generatie + edits + dirty-set). 4 failing tests → groen. `render_world` + `demo_world.png` visueel geverifieerd.
-10. ✅ S-06 edit/place-remove tool + edit-events: `voxel-edit` crate, `Edit` (world/old/new/actor/tick/revision) + `EditLog` (append-only, monotoon) + `EditTool::place/remove`. 4 failing tests → groen (old-capture, monotone revisies, tool update, replay-reproductie).
-11. ✅ S-07 persistence (save/load seed+edits): `voxel-persist` crate, eigen binair formaat (magic+seed+edits), `save_world`/`load_world`/`PersistError`. 3 failing tests → groen (round-trip reproductie, log-behoud, corrupt→Err). `demo_persist.png` bewijst save→load→toren-herstel. Renderer-agnostisch.
-12. ✅ S-08 spelercontroller + voxel-collision: `voxel-player` crate, `Player` (pos/AABB/yaw) + `PlayerController` (axis-separated collision, sub-stepping tegen tunnelen, `resolve_floor_y` voor vloer-rust). 4 failing tests → groen (vooruit-beweging, muur-blokkade, gravity→rust op vloer/terrain, langs-muur-glijden). `demo_player.png` bewijst first-person grond-niveau view. Renderer-agnostisch.
-13. ✅ ADR-0004 (client-shell): subagent-dossier (deleg_4c7b3b6d) → **Rust + Bevy/wgpu** gekozen (pure-Rust core native, geen FFI, gedeelde server-workspace; Godot GDExtension afgewezen voor eerste slice). Status Proposed, Fase-2 benchmark-gate (B-06/B-07 + FPS) blijft verplicht voor lock-in. Gedelegeerd door gebruiker (volmacht 2026-07-15).
-14. ✅ S-09 headless dedicated server: `voxel-server` crate, `Server` (World + EditLog + spelers), `tick` (stept PlayerController headless, géén GPU), `apply_edit` (server-authoritative, logt in EditLog), determinisme (zelfde seed+edits → identieke wereld). 4 failing tests → groen. `examples/headless_server.rs` draait 600 ticks headless, 3 spelers spawnen/vallen/lopen, beacon-edit zichtbaar in gedeelde wereld. **RUNNABLE ARTIFACT**: `cargo run --example headless_server -p voxel-server`.
-15. 🎯 **Vertical slice bereikt (S-01..S-09, strict TDD):** voxel-core→mesher→render→worldgen→world→edit→persist→player→server. Headless server runt zónder GPU; wereld is persistent (S-07) en server-authoritative (S-09). Client-shell = Rust+Bevy/wgpu (ADR-0004, Fase-2 benchmark-gate nog te lopen). Volgende (Fase 4): netwerk/protocol (multiplayer 2–8p), daarna echte Bevy/wgpu-client.
-16. ✅ S-10 GPU-renderer (wgpu/Vulkan, RTX 4080): `voxel-gpu` crate. `probe` bewijst wgpu init + offscreen readback op de host-GPU (probe.png: gradient-driehoek). `renderer` neemt `greedy_mesh`-triangles → vertex-buffer op de GPU, WGSL-shader met per-normaal directionele belichting + warme fog/atmosfeer + warme materiaal-tinten (Lay of the Land-vibe). `examples/gpu_world.rs` genereert 2×2 terrain (16.270 tris) en rendert naar gpu_world.png — visueel geverifieerd als geshade voxel-heuvels met diepte. **DIT IS DE EERSTE GPU-RENDER VAN DE ENGINE** (voldoet aan de gebruikerseis: engine draait op de GPU, niet de software-raster). wgpu gepind op 0.17.2 (0.18.0 yanked; 0.19/0.20 hebben API-drift). Camera-matrix via `glam` (geen handgeschreven matrix-fouten). Nog geen winit-venster (offscreen PNG), geen echte Bevy-integratie — dat is Fase 4.
-17. ✅ S-11 audit-hardening (2026-07-15): onafhankelijke code-audit (gratis model, deleg_b5c57770) vond 6 hoge + 13 middel-bevindingen; alle hoge claims door implementer in de bron geverifieerd en onder strict TDD gefixt (9 nieuwe tests eerst RED → GREEN, workspace 57/57): mesher-vlakken op juiste planes (+1-offset) + CCW-winding → backface-culling aan; serialize v3 (i64-coords i.p.v. stille i32-truncatie, nibble-validatie tegen palette i.p.v. panic op corrupt bestand); player terminal-velocity 40 u/s (anti-tunneling) + footprint-brede floor-resolve; server gesorteerde tick-volgorde (8-speler determinisme-test); persist atomair schrijven; gpu grass/dirt-tints gecorrigeerd, fog vanaf camera-eye, `Backends::PRIMARY`. Middel/laag-bevindingen als Fase-2b technische schuld in `docs/ROADMAP.md`. State-of-the-art onderzoeksadvies (bron-onderbouwd) in `docs/research/2026-07-15-sota-advies-vervolg.md`; roadmap Fase 2–5 daarmee geconcretiseerd (wgpu/winit-upgrade eerst, binary greedy meshing, chunk-key met lod, AO+CSM, Gaffer-netcode). Workflow-les vastgelegd: tests moeten posities/adversarial input asserteren, niet alleen aantallen.
+5. ✅ S-01-hardening: drie chunk-states (`Uniform`/`PalettePacked`/`Dense`) + 4-bit bitpacking + per-chunk palette (≤16), byte-stabiel versie-2 formaat.
+6. ✅ S-02 mesher-spike: `voxel-mesher` (naive→culled→greedy), waterdichte geometrie, geen renderer-dep.
+7. ✅ S-03 software-raster spike: `voxel-render` crate, `Camera` (perspectief) + `render_scene` (z-buffer, per-normaal shading) → PNG. Renderer-agnostisch.
+8. ✅ S-04 deterministische worldgen spike: `voxel-worldgen` crate, `generate_chunk(coord, seed)` (seeded value-noise heightmap, grass/dirt/stone lagen).
+9. ✅ S-05 multi-chunk world-store spike: `voxel-world` crate, `World` (HashMap cache + seed-generatie + edits + dirty-set).
+10. ✅ S-06 edit/place-remove tool + edit-events: `voxel-edit` crate, `Edit` + `EditLog` (append-only) + `EditTool::place/remove`.
+11. ✅ S-07 persistence (save/load seed+edits): `voxel-persist` crate, eigen binair formaat (`VWL1`).
+12. ✅ S-08 spelercontroller + voxel-collision: `voxel-player` crate, `Player` + `PlayerController` (axis-separated collision, sub-stepping, `resolve_floor_y`).
+13. ✅ ADR-0004 (client-shell): subagent-dossier → **Rust + Bevy/wgpu** gekozen (pure-Rust core native, geen FFI; Godot GDExtension afgewezen voor eerste slice). Status Proposed; Fase-2 benchmark-gate (B-06/B-07 + FPS) blijft verplicht voor lock-in.
+14. ✅ S-09 headless dedicated server: `voxel-server` crate. **RUNNABLE ARTIFACT**: `cargo run --example headless_server -p voxel-server`. Vertical slice bereikt (S-01..S-09).
+15. ✅ S-10 GPU-renderer (wgpu/Vulkan, RTX 4080): `voxel-gpu` crate. `probe` bewijst wgpu init + offscreen readback; `renderer` neemt `greedy_mesh`-triangles → GPU, WGSL-shader met per-normaal belichting + fog + materiaal-tinten. `examples/gpu_world.rs` → `gpu_world.png` (16.270 tris). Eerste GPU-render van de engine. wgpu gepind op 0.17.2 destijds.
+16. ✅ S-11 audit-hardening: onafhankelijke code-audit (6 hoog + 13 middel) → alle hoge gefixt onder strict TDD (9 nieuwe tests RED→GREEN, workspace 57/57): mesher-vlakken+winding, serialize v3 (i64-coords, nibble-validatie), player terminal-velocity + footprint-floor, server tick-volgorde, atomaire saves, gpu tints/fog/backends.
+17. ✅ S-12a (Fase-2b #1): `World::material_at` zonder chunk-clone (audit #12); player collision gebruikt cheap reader i.p.v. 32KB-clone per voxel-sample. 58/58 tests groen.
+18. ✅ S-12b (Fase 2a): wgpu 0.17→30 + winit 0.30 interactieve client. `gpu_window` example (ApplicationHandler, surface-render, WASD+muis-look free-fly camera), gedeelde pipeline met offscreen-pad. Geverifieerd: "GPU scene initialized (Bgra8UnormSrgb)". Fase 2a voltooid.
+19. 🎯 **Volgende harde gate: Fase-2 benchmark-gate** (B-06 determinisme-replay, B-07 headless 2–8 client soak, **FPS op 1 km²** op RTX 4080) vóór ADR-0004 lock-in. De 1 km²-meting bepaalt óók de LOD-strategie (advies #5, data-gedreven). Daarna: chunk-streaming (S-12 deel 3, advies #2), binary greedy meshing (advies #3), spelercontroller↔GPU-camera-koppeling.
 
 ## Auditwaarschuwing
-Researchmemo’s zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
+Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
 
 ## Actieve automatisering
 - Dagelijkse no-agent plan-alignmentguard.
