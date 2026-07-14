@@ -72,6 +72,12 @@ Bevy/wgpu (ADR-0004, status Proposed).
       `mesh_chunk_offthread_streams_result` (Rood→Groen). **62/62 tests groen.** Plan in
       `docs/milestone3-rayon-meshing.md`; afgeleid uit 3e subagent-onderzoek. Volgende:
       Mijlpaal 4 = 4K-texture-system (texture-arrays + PBR + triplanar, wgpu 0.30).
+- [x] **Hotfix (2026-07-15): wit scherm na P3**. Regressie: eerste frames alle chunks `pending`
+      → `tris.is_empty()` → `return` vóór surface-clear → wit. Fix: "never go white" guard —
+      `nearest_visible_chunk` (vrije fn, eigen frustum) mesht dichtstbijzijnde zichtbare chunk
+      **synchroon** als fallback frame 1; daarna async pool. `tris.is_empty()`-return verwijderd
+      (surface altijd gecleard). Unit-test `drained_mesh_lands_in_cache_after_one_frame`
+      (Rood→Groen) bewijst mesh-landt-uiteindelijk-in-cache. **63/63 tests groen.**
 - [x] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
       **S-12c deel 1 GEDAAN (2026-07-15):** GPU-benchmark-harness (`examples/gpu_bench.rs` +
       `GpuScene::render_triangles` offscreen-pad) meet FPS op 1 km² (1024 chunks, RTX 4080).

@@ -25,6 +25,42 @@ const VIEW_RADIUS: i64 = 24; // ~96 m view radius
 /// Max chunks whose meshes we ingest from the worker channel per frame (P3 upload budget).
 const UPLOAD_BUDGET: usize = 4;
 
+/// Find the chunk nearest the camera (Manhattan distance in chunk space) that passes the
+/// frustum test — used by the "never go white" guard to seed at least one mesh on frame 1.
+/// Free function (no `&self`) so it can run while `scene` holds a `&mut self.scene` borrow.
+fn nearest_visible_chunk(
+    view_proj: &[[f32; 4]; 4],
+    half: f32,
+    half_y: f32,
+    ccx: i64,
+    ccz: i64,
+) -> Option<ChunkCoord> {
+    let frustum = voxel_gpu::renderer::Frustum::from_view_proj(view_proj);
+    let mut best: Option<(i64, ChunkCoord)> = None;
+    for dx in -VIEW_RADIUS..=VIEW_RADIUS {
+        for dz in -VIEW_RADIUS..=VIEW_RADIUS {
+            let cx = ccx + dx;
+            let cz = ccz + dz;
+            if cx < 0 || cz < 0 {
+                continue;
+            }
+            let center = [
+                (cx as f32 + 0.5) * CHUNK_M,
+                half_y,
+                (cz as f32 + 0.5) * CHUNK_M,
+            ];
+            if !frustum.intersects_aabb(center, half.max(half_y)) {
+                continue;
+            }
+            let dist = dx.abs() + dz.abs();
+            if best.map_or(true, |(bd, _)| dist < bd) {
+                best = Some((dist, ChunkCoord::new(cx, 0, cz)));
+            }
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
@@ -332,11 +368,6 @@ impl App {
             return;
         };
 
-        // --- Frustum culling (S-12c deel 2): only stream chunks inside the view.
-        let frustum = voxel_gpu::renderer::Frustum::from_view_proj(&self.camera.view_proj());
-        let half = CHUNK_M * 0.5; // 2 m half-extent (x/z)
-        let half_y = CHUNK_M * 1.5; // terrain is <= ~1 chunk tall, pad for height
-
         // --- (P3) Drain finished meshes from the worker channel (bounded per-frame budget,
         //     stale results dropped via generation counter). Non-blocking: the render thread
         //     never generates/meshes a chunk itself.
@@ -355,11 +386,31 @@ impl App {
             self.pending.remove(&r.coord);
         }
 
+        // --- "Never go white" guard: seed at least one mesh synchronously so the surface
+        //     always clears + draws on the first frames (before async workers deliver).
+        //     P3 async meshing takes over from the next frame. The helper builds its own
+        //     frustum, so no borrow conflict with the draw-loop's frustum below.
+        let [ex0, _ey0, ez0] = self.camera.eye;
+        let ccx0 = (ex0 / CHUNK_M).floor() as i64;
+        let ccz0 = (ez0 / CHUNK_M).floor() as i64;
+        let half0 = CHUNK_M * 0.5;
+        let half_y0 = CHUNK_M * 1.5;
+        let mut tris: Vec<Triangle> = Vec::new();
+        let vp = self.camera.view_proj();
+        if let Some(coord) = nearest_visible_chunk(&vp, half0, half_y0, ccx0, ccz0) {
+            let chunk = self.world.get_or_generate(coord);
+            let m = voxel_mesher::greedy_mesh(&chunk);
+            self.mesh_cache.insert(coord, m.clone());
+            tris.extend_from_slice(&m);
+        }
+
         // --- Chunk-streaming: draw visible chunks; request missing ones off-thread. ---
         let [ex, _ey, ez] = self.camera.eye;
         let ccx = (ex / CHUNK_M).floor() as i64;
         let ccz = (ez / CHUNK_M).floor() as i64;
-        let mut tris: Vec<Triangle> = Vec::new();
+        let half = CHUNK_M * 0.5; // 2 m half-extent (x/z)
+        let half_y = CHUNK_M * 1.5; // terrain is <= ~1 chunk tall, pad for height
+        let frustum = voxel_gpu::renderer::Frustum::from_view_proj(&self.camera.view_proj());
         for dx in -VIEW_RADIUS..=VIEW_RADIUS {
             for dz in -VIEW_RADIUS..=VIEW_RADIUS {
                 let cx = ccx + dx;
@@ -396,9 +447,6 @@ impl App {
                 }
                 // else: pending, not ready yet -> skipped this frame, pops in later.
             }
-        }
-        if tris.is_empty() {
-            return;
         }
 
         let frame = surface.get_current_texture();

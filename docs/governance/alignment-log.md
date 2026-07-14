@@ -290,10 +290,16 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
   `UPLOAD_BUDGET` (4), discardt stale via gen-counter. Strict TDD: unit-test
   `mesh_chunk_offthread_streams_result` (Rood→Groen). **62/62 tests groen** (60+2 nieuw).
   Plan in docs/research/2026-07-15-milestone3-rayon-meshing.md.
-- **Niet gedaan (wel gepland):** staging-ring i.p.v. `write_buffer` (wgpu#1242 ~25 ms spike),
-  P2 distance/triangle-budget, Mijlpaal 4 = 4K-texture-system (texture-arrays + PBR + triplanar
-  op wgpu 0.30, zie onderzoek docs/research/2026-07-15-texture-4k-aanbeveling.md). Die volgen als
-  aparte mijlpalen.
+- **Mijlpaal 4 (4K-texture-system)** staat nog open (onderzoek klaar: docs/research/2026-07-15-texture-4k-aanbeveling.md).
+- **Hotfix wit scherm (2026-07-15):** na Mijlpaal 3 rapporteerde de gebruiker een wit scherm.
+  Root cause: in de eerste frames zijn alle chunks `pending` (async workers nog niet klaar) →
+  `tris.is_empty()` → `return` vóór `surface.get_current_texture()` → de surface wordt nooit
+  gecleared (clear-color is [0.62,0.66,0.74] grijsblauw, dus wit = nooit renderen). Fix:
+  "never go white" guard — `nearest_visible_chunk` (vrije fn, eigen frustum, géén `&self` borrow
+  conflict) mesht de dichtstbijzijnde zichtbare chunk **synchroon** als frame-1 fallback; daarna
+  neemt de async rayon-pool over. Ook de `tris.is_empty()`-return verwijderd (surface altijd
+  gecleard). Unit-test `drained_mesh_lands_in_cache_after_one_frame` (Rood→Groen) toonde eerst de
+  bug (mesh landt niet in 1 sync drain) en bewijst nu het contract. **63/63 tests groen.** Gepushed.
 - Geen drift vs canoniek plan/roadmap. Code niet versoepeld ondanks complexiteit.
 - Commit + push naar origin main (grens A) volgt.
 
