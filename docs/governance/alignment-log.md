@@ -87,5 +87,21 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
   - Renderer-agnostisch (ADR-0002): geen godot/bevy/wgpu in `voxel-core/Cargo.toml`; geen renderer-import in code. Bevestigd.
 - Geheugenbudget: `PalettePacked` = N³/2 bytes (16.384 B voor 32³) vs `Dense` = N³ bytes (32.768 B); `Uniform` = 0. Voldoet aan "≤4 B/actieve voxel"-target van ADR-0001 bij gemiddeld <16 materialen.
 - Verplichte terugstap: plan-alignment OK (canoniek plan + ADR's 0001–0003 intact); budgetguard project-key spent $27,5299 (onder €30 → paid blijft dicht; ver onder $36 stop). Geen drift t.o.v. canoniek plan. Geen betaalde calls deze sessie; alles lokaal + gratis `:free`.
-- Volgende stap (autonoom): S-03 renderer/camera spike (wgpu headless of software raster) om mesher-output zichtbaar te maken — nu veilig mogelijk omdat voxelopslag waterdicht is.
+- Planstatus: aligned. Volgende stap (autonoom): S-03 renderer/camera spike (wgpu headless of software raster) om mesher-output zichtbaar te maken — nu veilig mogelijk omdat voxelopslag waterdicht is.
 - Commit + push naar origin main (grens A) volgt na deze terugstap.
+
+## 2026-07-15 — S-03 software-raster spike voltooid (strict TDD) + verplichte terugstap na uitvoeringsstap 3
+- Autonome keuze: S-03 software-raster (puur Rust, géén GPU) boven wgpu/Vulkan — laagste risico, geen driver/GPU-afhankelijkheid; bewijst de `Chunk -> mesh -> beeld`-keten end-to-end vóór de zware renderer-keuze (ADR-0002, Fase 2). Sluit aan op gebruikersvraag over "taal/Vulkan".
+- Strict TDD:
+  - ROOD: `crates/voxel-render` crate aangemaakt (workspace member), `spike-s03-render.md` plan geschreven, `tests/spike_s03.rs` (3 failing tests: leeg/één voxel/volle chunk) — `cargo test -p voxel-render` faalde met "no `Camera`/`render_scene` in root".
+  - GROEN: `camera.rs` (perspectief, yaw/pitch/distance/fov) + `render.rs` (look-at view-proj, z-buffer, per-normaal Lambert-shading) + `examples/demo.rs`. Eén echte bug gevonden/corrigeerd: projectie had een tekenfout in de view/proj-conventie (clip-w negatief voor voorliggende geometrie) → herschreven naar één consistente +z-forward (DX-style) conventie.
+  - Tweede fix: test-fixture plaatste de "één voxel" op chunk-hoek (0,0,0), ver buiten het camerabrandpunt (chunk-centrum 16,16,16) → vaak buiten beeld. Vastgezet op chunk-centrum (16,16,16); rasterizer was correct.
+- Verificatie:
+  - `cargo test --workspace`: 25 tests groen (voxel-core 13, voxel-mesher 6, voxel-render 3, doc/unit).
+  - `cargo run --example demo -p voxel-render`: `demo.png` (256x256, 10654 niet-achtergrondpixels) gegenereerd.
+  - Visuele verificatie via vision: herkenbare 3D voxel-scène (groene grondslab, twee bruine pilaren, grijze beacon), correcte projectie + shading. Bewijst `greedy_mesh`-output is zichtbaar.
+  - Renderer-agnostisch (ADR-0002): `voxel-render` gebruikt alleen pure-Rust `image`-crate; géén godot/bevy/wgpu import in `voxel-core`/`voxel-mesher`. Bevestigd.
+- Onafhankelijke review: subagent gestart (deleg_6881a331) op S-01-hardening-diff; bevindingen worden verwerkt in een aparte log-entry zodra beschikbaar.
+- Verplichte terugstap: plan-alignment OK (canoniek plan + ADR's 0001–0003 + S-03 plan intact). Budgetguard project-key spent $27,5299 (onder €30 → paid blijft dicht; ver onder $36 stop). Geen drift; geen betaalde calls (alles lokaal + gratis `:free`). Taakuitbesteding via subagent bespaart eigen `hy3:free` context/rate-limit.
+- Volgende stap (autonoom): S-03 uitbreiden (demo-scenario's/schaal) of S-04 client-shell/input (wgpu na Fase-2 benchmark).
+- Commit + push naar origin main (grens A) volgt.

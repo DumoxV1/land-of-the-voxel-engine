@@ -19,7 +19,7 @@ Een filmische, zeer rijke en dynamische openwereld-RPG op een eigen micro-voxelf
 Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontroleerd en wordt plan-alignment expliciet vastgelegd in `docs/governance/alignment-log.md`.
 
 **Status:** researchreview en plansynthese VOLTOOID  \
-**Actieve fase:** Fase 0 → engine-startgate GEOPEND (S-01 voxel-core + S-01-hardening onder strict TDD)  \
+**Actieve fase:** Fase 0 → engine-startgate GEOPEND (S-01 voxel-core + S-01-hardening + S-02 mesher + S-03 software-raster onder strict TDD)  \
 **Laatste update:** 2026-07-15
 
 ## Volgende gates
@@ -28,7 +28,9 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
 3. ✅ Exact implementatieplan voor de eerste `voxel-core` tracer bullet (S-01) geschreven (zie `.hermes/plans/spike-s01-voxel-core.md`).
 4. ✅ S-01 onder strict TDD: failing tests eerst (rood), dan implementatie (groen). Repo scaffold + `voxel-core` crate.
 5. ✅ S-01-hardening: drie chunk-states (`Uniform`/`PalettePacked`/`Dense`) + 4-bit bitpacking + per-chunk palette (≤16), byte-stabiel versie-2 formaat. 7 nieuwe failing tests → groen.
-6. ⏳ Na S-01-hardening groen: S-03 renderer/camera spike (wgpu headless of software raster) om mesher-output zichtbaar te maken; eerst toolchain/dependency hardening.
+6. ✅ S-01-hardening: drie chunk-states (`Uniform`/`PalettePacked`/`Dense`) + 4-bit bitpacking + per-chunk palette (≤16), byte-stabiel versie-2 formaat. 7 nieuwe failing tests → groen.
+7. ✅ S-03 software-raster spike: `voxel-render` crate, `Camera` (perspectief) + `render_scene` (z-buffer, per-normaal shading) → PNG. 3 failing tests → groen; demo-PNG gegenereerd en visueel geverifieerd (voxel-scène herkenbaar). Geen GPU/renderer-dep in core-crates (ADR-0002).
+8. ⏳ Volgende: S-03 uitbreiden (meer demo-scenario's / schaal) of S-04 (client-shell/input — wgpu naargelang Fase-2 benchmark) — keuze autonoom volgende sessie.
 
 ## Auditwaarschuwing
 Researchmemo’s zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
