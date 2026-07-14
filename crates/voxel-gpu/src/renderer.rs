@@ -68,8 +68,9 @@ impl GpuCamera {
     }
 }
 
-/// Warm material tints (Lay of the Land vibe), matching voxel-worldgen's material ids:
-/// 0 = air, 1 = dirt, 2 = grass, 3 = stone (S-11 audit fix: grass/dirt were swapped).
+/// Warm material tints (Lay of the Land vibe), indexed by material id 0..=15.
+/// Canonical ids follow voxel-worldgen: 1 = DIRT, 2 = GRASS, 3 = STONE (S-11 fix G-01 —
+/// grass/dirt were swapped here versus worldgen/voxel-render).
 pub fn material_tint(mat: MaterialId) -> [f32; 3] {
     match mat.0 {
         0 => [0.0, 0.0, 0.0],        // air
@@ -183,7 +184,7 @@ impl GpuScene {
                 targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
             }),
             primitive: wgpu::PrimitiveState {
-                // Mesher guarantees CCW winding seen from outside (S-11), so cull backfaces.
+                // Mesher emits CCW-from-outside winding (S-11 fix), so cull back faces.
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },

@@ -18,9 +18,8 @@ const JUMP_SPEED: f32 = 8.0;
 const MOVE_SPEED: f32 = 5.0;
 /// Maximum physics sub-step (s) to avoid tunnelling through thin voxels at high speed.
 const MAX_SUB_DT: f32 = 0.02;
-/// Terminal fall speed (world units / s). Caps per-substep displacement below one voxel
-/// (40 * 0.02 = 0.8 < 1.0) so a falling player cannot tunnel through thin floors
-/// (S-11 audit fix).
+/// Terminal fall speed (world units / s). Keeps per-substep displacement < 1 voxel so a
+/// 1-thick floor can never be tunnelled through (S-11 audit fix P-01).
 const TERMINAL_FALL_SPEED: f32 = 40.0;
 
 /// A player avatar: position, facing yaw, and ground state.

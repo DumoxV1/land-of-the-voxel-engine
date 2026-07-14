@@ -14,9 +14,9 @@
 //!   Dense only:
 //!     [..]   dense CHUNK_SIZE^3 material bytes (one per voxel, flat)
 //!
-//! Versioning starts at day one (ADR-0003). Version 2 used i32 coords which silently
-//! truncated far chunks (S-11 audit fix); version 3 stores full i64 and validates that
-//! every packed nibble indexes inside the palette.
+//! Versioning starts at day one (ADR-0003). Version 2 stored coords as i32 (silent
+//! truncation beyond ±2^31 — S-11 audit fix C-01); version 3 stores full i64 coords and
+//! validates every packed nibble against the palette length.
 
 use crate::chunk::{Chunk, ChunkState};
 use crate::coords::{ChunkCoord, CHUNK_SIZE};

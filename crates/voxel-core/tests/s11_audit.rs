@@ -21,7 +21,7 @@ fn packed_chunk() -> Chunk {
 fn malformed_nibble_out_of_palette_range_is_err() {
     let chunk = packed_chunk();
     let mut bytes = chunk.to_bytes();
-    // Header: version(1) + i64 coords(24) + state(1) + uniform(1) = 27, then palette_len(1).
+    // Header v3: version(1) + 3*i64(24) + state(1) + uniform(1) = 27, then palette_len(1).
     let plen = bytes[27] as usize;
     assert!(plen < 16, "test setup: palette should be small");
     // Corrupt the first packed byte: both nibbles = 15, far beyond palette_len.
