@@ -189,3 +189,10 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - S-11 fixes onder strict TDD (9 nieuwe tests RED→GREEN; workspace 57/57): mesher-planes/winding (+culling aan), serialize v3 (i64, nibble-validatie), player anti-tunneling + footprint-floor, server tick-orde-determinisme, atomaire saves, gpu-tints/fog/backends. Commit 1a8e093.
 - Plan-alignment: canoniek plan ongewijzigd van koers (vertical slice → interactieve client → gates). ROADMAP.md geconcretiseerd met bron-onderbouwd advies (docs/research/2026-07-15-sota-advies-vervolg.md): wgpu/winit-upgrade vóór interactieve client, binary greedy meshing, chunk-key (x,y,z,lod), AO+CSM in Fase 3, Gaffer-netcode in Fase 4, LOD-beslissing data-gedreven na 1 km²-benchmark. Fase 2b (technische schuld) toegevoegd.
 - Workflow-les (vastgelegd in ROADMAP.md): count-based tests misten de 2 ernstigste bugs; voortaan golden-tests op exacte waarden + malformed-input tests per spike; onafhankelijke audit na elke fase.
+
+## 2026-07-15 (sessie 2) — S-12 deel 1 (Fase-2b #1 clone-fix)
+- Bronnen gelezen: EVALUATION_AND_HANDOFF.md (B), PROJECT_STATE.md, ROADMAP.md, SOTA-advies. Status bevestigd: S-01..S-11 af, 57/57 groen.
+- Uitvoeringsstappen 1-3: canonieke bronnen gelezen; deps geïnventariseerd (voxel-gpu op wgpu 0.17, géén winit); wgpu/winit-upgrade-onderzoek gedelegeerd aan gratis model (loopt); S-12 deel 1 uitgevoerd + gecommit.
+- S-12 deel 1 = Fase-2b #1 uit roadmap: `World::material_at(&mut self, WorldVoxel) -> MaterialId` toegevoegd (geen chunk-clone); `voxel-player::solid_at` gebruikt nu die reader i.p.v. `get_or_generate().get()` (audit #12: 32 KB-clone per voxel-sample in collision). Strict TDD: failing test eerst (RED: `material_at` bestond niet), daarna GREEN. 58/58 tests groen.
+- Terugstap-check (na 3e stap): géén drift vs canoniek plan; roadmap/noordster ongewijzigd; geen architectuurwijziging. Commit d8e34cc op origin/main.
+- Volgende: wacht wgpu/winit-onderzoek af, dan Fase 2a upgrade-plan schrijven (wgpu>=22 + winit 0.30 ApplicationHandler) onder TDD.
