@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/voxel-core", "crates/voxel-mesher", "crates/voxel-render", "crates/voxel-worldgen"]
+members = ["crates/voxel-core", "crates/voxel-mesher", "crates/voxel-render", "crates/voxel-worldgen", "crates/voxel-world"]
 
 [workspace.package]
 version = "0.1.0"

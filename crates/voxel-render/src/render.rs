@@ -7,6 +7,7 @@
 use crate::camera::Camera;
 use image::{ImageBuffer, Rgba, RgbaImage};
 use voxel_core::chunk::Chunk;
+use voxel_core::coords::{ChunkCoord, CHUNK_SIZE};
 use voxel_core::palette::MaterialId;
 use voxel_mesher::{Triangle, Vec3, greedy_mesh};
 
@@ -33,10 +34,34 @@ const MATERIAL_COLORS: [[u8; 3]; 16] = [
     [210, 210, 120], // 15
 ];
 
-/// Render a chunk to an `RgbaImage` of the given dimensions.
+/// Render a single chunk to an `RgbaImage` of the given dimensions.
 pub fn render_scene(chunk: &Chunk, cam: &Camera, w: u32, h: u32) -> RgbaImage {
     let tris = greedy_mesh(chunk);
     rasterize(&tris, cam, w, h)
+}
+
+/// Render many chunks (a `World` view) to one image. Each `(coord, chunk)` is meshed and the
+/// triangles are offset into world space by `coord * CHUNK_SIZE` so adjacent chunks line up.
+/// `chunks` is a slice of (chunk coord, chunk data); the caller supplies them (no hard
+/// dependency on a world store, keeping the renderer agnostic).
+pub fn render_world(chunks: &[(ChunkCoord, Chunk)], cam: &Camera, w: u32, h: u32) -> RgbaImage {
+    let mut all: Vec<Triangle> = Vec::new();
+    let s = CHUNK_SIZE as f32;
+    for (coord, chunk) in chunks {
+        let ox = coord.x as f32 * s;
+        let oy = coord.y as f32 * s;
+        let oz = coord.z as f32 * s;
+        for t in greedy_mesh(chunk) {
+            all.push(Triangle {
+                a: Vec3::new(t.a.x + ox, t.a.y + oy, t.a.z + oz),
+                b: Vec3::new(t.b.x + ox, t.b.y + oy, t.b.z + oz),
+                c: Vec3::new(t.c.x + ox, t.c.y + oy, t.c.z + oz),
+                normal: t.normal,
+                material: t.material,
+            });
+        }
+    }
+    rasterize(&all, cam, w, h)
 }
 
 /// Build a perspective view+projection and rasterize the triangles with a z-buffer.

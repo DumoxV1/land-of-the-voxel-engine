@@ -132,3 +132,17 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - Verplichte terugstap (na 3e uitvoeringsstap): plan-alignment OK (canoniek plan + ADR's 0001–0003 + S-04 plan intact). S-01-hardening review ingevlogen en verwerkt (9056d81). Budgetguard project-key spent $27,5299 (onder €30 → paid blijft dicht; ver onder $36 stop). Geen drift; geen betaalde calls (alles lokaal + gratis `:free`).
 - Volgende stap (autonoom): S-05 multi-chunk wereld/streaming-basis, of S-04 uitbreiden (biomes/macro-micro per plan §2.1). Client-shell-keuze blijft Fase-2 gate.
 - Commit + push naar origin main (grens A) volgt.
+
+## 2026-07-15 — S-05 multi-chunk world-store spike voltooid (strict TDD) + verplichte terugstap na uitvoeringsstap 3
+- Autonome keuze: S-05 world-store (opmaat naar Fase 3 "asynchrone chunkgeneration/meshing" + "save/load seed+edits" uit canoniek plan). Binnen bestaande ADR's; geen client-shell-beslissing nodig.
+- Strict TDD:
+  - ROOD: `crates/voxel-world` crate (workspace member), `spike-s05-world.md` plan, `tests/spike_s05.rs` (4 failing tests) — `cargo test -p voxel-world` faalde met "unresolved import World".
+  - GROEN: `World { chunks: HashMap<ChunkCoord,Chunk>, dirty: HashSet, seed }` met `new`, `get_or_generate` (cached, deterministic), `chunk_at`, `set_voxel` (world→chunk mapping via `ChunkCoord::from_world`+`LocalVoxel::from_world`, markeert dirty), `dirty_chunks`/`take_dirty`. Edits overleven generatie (entry().or_insert_with).
+  - Twee bugs tijdens TDD gecorrigeerd: (a) borrow-checker: `get_or_generate` gaf `&Chunk` → conflicterende borrows bij meerdere calls; omgezet naar by-value return (clone). (b) demo-toren stond op wereld-Y 5..9, bedolven onder terrain (~Y20+); verplaatst naar surface+1..surface+4 (surface gemeten uit chunk) → zichtbaar.
+- Verificatie:
+  - `cargo test --workspace`: 36 tests groen (voxel-core 15, voxel-mesher 6, voxel-render 3, voxel-worldgen 5, voxel-world 4).
+  - `render_world` toegevoegd aan voxel-render (offset per chunk naar wereldruimte, géén harde voxel-world dep → renderer-agnostisch). `examples/demo_world.rs` → `demo_world.png` (384x384, 82955 niet-achtergrondpixels): 2x2 chunks naadloos + metalen toren-edit zichtbaar (visueel geverifieerd).
+  - Ongebruikte import (`LocalVoxel` in render.rs) verwijderd; warnings schoon op nieuwe code.
+- Verplichte terugstap (na 3e uitvoeringsstap): plan-alignment OK (canoniek plan + ADR's 0001–0003 + S-05 plan intact). S-01-hardening review verwerkt (9056d81). Budgetguard project-key spent $27,5299 (onder €30 → paid blijft dicht; ver onder $36 stop). Geen drift; geen betaalde calls (alles lokaal + gratis `:free`). ADR-0004 (client-shell) loopt als subagent (deleg_4c7b3b6d); wordt als aparte log-entry + ADR-bestand verwerkt zodra binnen.
+- Volgende stap (autonoom): S-06 edit/place-remove tool + revisie, richting werkende vertical slice.
+- Commit + push naar origin main (grens A) volgt.
