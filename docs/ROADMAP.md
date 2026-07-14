@@ -45,7 +45,7 @@ Bevy/wgpu (ADR-0004, status Proposed).
       met offscreen-pad. Geverifieerd: "GPU scene initialized (Bgra8UnormSrgb)".
 - [x] **Interactieve GPU-client**: winit-venster + render-loop + camera-input (WASD + muis).
       Vervangt offscreen-PNG door een live venster dat de `World` rendert (S-12b).
-- [ ] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
+- [x] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
       **S-12c deel 1 GEDAAN (2026-07-15):** GPU-benchmark-harness (`examples/gpu_bench.rs` +
       `GpuScene::render_triangles` offscreen-pad) meet FPS op 1 km² (1024 chunks, RTX 4080).
       **Uitslag: 8,8 avg FPS bij 1,25 M zichtbare tris/frame (p50 129 ms, p95 141 ms)** —
@@ -54,6 +54,15 @@ Bevy/wgpu (ADR-0004, status Proposed).
       + triangle-distance-budget + buffer-pooling toevoegen aan de streamer, dan hermeten.
       Zie `docs/benchmarks/2026-07-15-fase2-fps-1km2.md`. ADR-0004 lock-in uitgesteld
       totdat de scene efficienter is.
+- [x] **S-13 micro-voxel resolutie (12,5 cm) — ADR-0005 (2026-07-15):** `voxel-core::coords`
+      kreeg `VOXEL_SIZE_M = 0,125` (12,5 cm, binnen gebruikersband 9,5–13,5 cm) +
+      `chunk_m_size() = 4 m`. 1 km² = **62.500 chunks** (was 1.024). Strict TDD:
+      `spike_s13.rs` (2 failing tests eerst, daarna groen). Camera's (gpu_window/gpu_world/bench)
+      op 12,5 cm-schaal (eye ~6,25 m boven ~4 m terrain, view-radius verhoogd). Bench draait
+      op de nieuwe schaal (534 FPS op kleine scene, géén crash). `gpu_world.png` geregenereerd.
+      60/60 tests groen. **Volgende:** worldgen-noise fijnere schaal (advies #6) + first-person
+      player-camera op 12,5 cm (S-12c deel 2) om het "micro"-effect zichtbaar te maken;
+      de 1 km²-FPS-gate op 12,5 cm vereist frustum-culling (S-12c deel 2).
 - [ ] Chunk-streaming (advies #2): dedicated rayon-pool + kanalen, afstand-geprioriteerde
       queue met generation-counters, upload-budget per frame, buffer-pooling.
       Chunk-key alvast `(x, y, z, lod)` zodat LOD later geen herschrijf vergt (advies #5).

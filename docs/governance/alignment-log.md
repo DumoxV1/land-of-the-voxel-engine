@@ -241,3 +241,28 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
   streamer, dan hermeten; pas bij gezonde FPS → ADR-0004 naar Accepted. Reproduceerbaarheid
   van de bench nog te bevestigen met een 2e run (<10% afwijking).
 - Commit + push naar origin main (grens A) volgt.
+
+## 2026-07-15 (sessie 5) — S-13: micro-voxel resolutie 12,5 cm (ADR-0005)
+- Gebruikersbesluit: voxels **tussen 9,5–13,5 cm, streven 12,5 cm** (Lay of the Land / Voxtopolis
+  / John Lin / Tantan-richting). Voorheen impliciet **1 voxel = 1 m** (chunk=32 m).
+- ADR-0005 geschreven + Accepted (autonoom): 1 voxel = 0,125 m (12,5 cm, 1/8 m macht-van-twee,
+  nette schaal-wiskunde), chunk blijft 32³ voxels → **chunk = 4 m** (was 32 m). Wereld-coördinaten
+  blijven integer-in-voxels (geen coords-wijziging, Euclidean-divisie intact). 1 km² = **62.500 chunks**
+  (was 1.024). Keuze: klein chunk (4 m) i.p.v. 32 m/256³ (RAM-explosie ~2,4–4,6 GB/chunk-set).
+- Strict TDD: `spike_s13.rs` (2 failing tests: VOXEL_SIZE_M, one_km2_is_62500_chunks) →
+  `voxel-core/src/coords.rs` kreeg `VOXEL_SIZE_M: f32 = 0,125` + `chunk_m_size()`. Rood bevestigd
+  (unresolved imports), daarna Groen (2/2). Opmerking: patch verwijderde tijdelijk `use std::ops::Div;`
+  (nodig voor euclidean_div) — teruggezet, géén regressie.
+- Camera's naar 12,5 cm-schaal: gpu_window/gpu_world/bench eye ~6,25 m boven ~4 m terrain
+  (was 55 m), view-radius default 60 (was 8). Bench anchor nu binnen wereld-grens (was buiten →
+  0 frames); radius 3 run = 534 FPS, 52k tris, géén crash.
+- `gpu_world.png` geregenereerd op 12,5 cm (16.270 tris, GPU-rendered). Vision-check: terrain
+  rendert correct (groen/dirt/stone, shading, depth) maar op 2×2-chunk-zoom oogt het nog blocky
+  — het "micro"-effect komt pas bij first-person (S-12c deel 2) of grotere scenes (1 km² vereist
+  frustum-culling). Geen bug; zoom/scale-afhankelijk.
+- Verificatie: cargo test --workspace **60/60 groen** (58 + 2 nieuw S-13), géén regressie in
+  coords/worldgen/physics. Impressie-set (23 PNG/JPG) verzameld in docs/research/impressie-microvoxel/.
+- ROADMAP + PROJECT_STATE + alignment-log bijgewerkt. Geen drift vs canoniek plan.
+- Volgende: S-12c deel 2 (frustum-culling + budget + buffer-pooling) voor de 1 km²-FPS-gate op
+  12,5 cm-schaal; worldgen-noise fijnere schaal (advies #6); first-person player-camera op 12,5 cm.
+- Commit + push naar origin main (grens A) volgt.

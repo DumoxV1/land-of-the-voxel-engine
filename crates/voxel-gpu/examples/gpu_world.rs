@@ -24,9 +24,10 @@ fn main() {
         }
         println!("meshed {} triangles across 4 chunks", tris.len());
 
-        // Camera positioned to view the terrain block (Lay of the Land-ish eye height).
+        // Camera positioned on the 12.5 cm micro-voxel scale (S-13 / ADR-0005):
+        // above the ~4 m (32-voxel) terrain, looking down across the 4 m chunks.
         let scene = GpuScene::new_offscreen(512, 512).await.expect("gpu scene");
-        let cam = GpuCamera::new([16.0, 55.0, 90.0], -std::f32::consts::FRAC_PI_2, -0.5, 1.0);
+        let cam = GpuCamera::new([16.0, 50.0, 24.0], -std::f32::consts::FRAC_PI_2, -0.6, 1.0);
         scene
             .render_triangles_png(&tris, &cam, "crates/voxel-gpu/gpu_world.png")
             .await

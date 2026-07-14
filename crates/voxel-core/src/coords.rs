@@ -5,6 +5,17 @@ use std::ops::Div;
 /// Side length of a cubic chunk, in voxels. Fixed for S-01; benchmarks may revisit.
 pub const CHUNK_SIZE: i64 = 32;
 
+/// Edge length of one voxel, in meters. S-13 (ADR-0005): micro-voxel target
+/// 12.5 cm (1/8 m), within the user's 9.5-13.5 cm band. World coordinates
+/// stay integer in voxel units; meters is only a derived scale for camera/physics/bench.
+pub const VOXEL_SIZE_M: f32 = 0.125;
+
+/// Edge length of a chunk, in meters (CHUNK_SIZE * VOXEL_SIZE_M = 4 m).
+#[inline]
+pub fn chunk_m_size() -> f32 {
+    CHUNK_SIZE as f32 * VOXEL_SIZE_M
+}
+
 /// A voxel position in the infinite integer world space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WorldVoxel {

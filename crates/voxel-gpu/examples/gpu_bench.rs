@@ -22,7 +22,7 @@ const CHUNK: f32 = 32.0; // 1 voxel = 1 m, 1 chunk = 32 m (wereldgen schaal)
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let side = args.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(32);
-    let radius = args.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(8);
+    let radius = args.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(60);
     let frames = args.get(3).and_then(|s| s.parse::<usize>().ok()).unwrap_or(300);
     let w = args.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1024);
     let h = args.get(5).and_then(|s| s.parse::<u32>().ok()).unwrap_or(768);
@@ -47,11 +47,15 @@ fn main() {
         // Mesh-cache per chunk (streaming: mesh elke chunk slechts één keer).
         let mut mesh_cache: HashMap<ChunkCoord, Vec<Triangle>> = HashMap::new();
 
-        // Camera begint boven het midden van de wereld, op eye-hoogte.
-        let mid = (side as f32) * CHUNK * 0.5;
-        let mut cam = GpuCamera::new([mid, 55.0, mid], -std::f32::consts::FRAC_PI_2, -0.35, w as f32 / h as f32);
-        let eye_y = 55.0;
-        let orbit_r = (radius as f32) * CHUNK * 0.6; // camera blijft binnen de view-distance-ring
+        // Camera anchor: a fixed spot INSIDE the world bounds (not its center),
+        // so the streamer only ever generates chunks within [0, side). The orbit
+        // stays within radius of the anchor, clamped to the world edge.
+        let anchor_cx = (radius + 2).min(side - radius - 1).max(radius);
+        let anchor_cz = anchor_cx;
+        let mid = anchor_cx as f32 * CHUNK;
+        let mut cam = GpuCamera::new([mid, 50.0, mid], -std::f32::consts::FRAC_PI_2, -0.6, w as f32 / h as f32);
+        let eye_y = 50.0; // ~6.25 m, above the ~4 m (32-voxel) terrain on the 12.5 cm scale
+        let orbit_r = (radius as f32) * CHUNK * 0.5; // path well inside the world
 
         let mut frame_times: Vec<f64> = Vec::with_capacity(frames);
         let mut total_visible = 0usize;
