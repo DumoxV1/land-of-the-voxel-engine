@@ -1,0 +1,16 @@
+{
+  "spike": "S-12c-fase2-benchmark-gate",
+  "gpu": "RTX 4080 Super",
+  "side_chunks": 32,
+  "world_area_m2": 1048576,
+  "view_radius_chunks": 8,
+  "frames": 300,
+  "render_w": 1024,
+  "render_h": 768,
+  "avg_visible_triangles": 1249132,
+  "p50_ms": 129.309,
+  "p95_ms": 140.743,
+  "p99_ms": 151.198,
+  "avg_ms": 114.128,
+  "avg_fps": 8.76
+}

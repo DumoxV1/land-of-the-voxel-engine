@@ -46,6 +46,14 @@ Bevy/wgpu (ADR-0004, status Proposed).
 - [x] **Interactieve GPU-client**: winit-venster + render-loop + camera-input (WASD + muis).
       Vervangt offscreen-PNG door een live venster dat de `World` rendert (S-12b).
 - [ ] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
+      **S-12c deel 1 GEDAAN (2026-07-15):** GPU-benchmark-harness (`examples/gpu_bench.rs` +
+      `GpuScene::render_triangles` offscreen-pad) meet FPS op 1 km² (1024 chunks, RTX 4080).
+      **Uitslag: 8,8 avg FPS bij 1,25 M zichtbare tris/frame (p50 129 ms, p95 141 ms)** —
+      gate **NIET gehaald**. Oorzaak = scene-samenstelling (geen frustum-culling, geeen
+      distance-budget, per-frame VBO), niet de renderer-pipeline. **S-12c deel 2**: frustum-culling
+      + triangle-distance-budget + buffer-pooling toevoegen aan de streamer, dan hermeten.
+      Zie `docs/benchmarks/2026-07-15-fase2-fps-1km2.md`. ADR-0004 lock-in uitgesteld
+      totdat de scene efficienter is.
 - [ ] Chunk-streaming (advies #2): dedicated rayon-pool + kanalen, afstand-geprioriteerde
       queue met generation-counters, upload-budget per frame, buffer-pooling.
       Chunk-key alvast `(x, y, z, lod)` zodat LOD later geen herschrijf vergt (advies #5).

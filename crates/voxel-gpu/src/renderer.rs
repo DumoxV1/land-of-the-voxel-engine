@@ -512,6 +512,44 @@ impl GpuScene {
     pub fn format(&self) -> wgpu::TextureFormat {
         self.format
     }
+
+    /// Render triangles into an offscreen target and block until the GPU finishes
+    /// (`device.poll(wait)`). Unlike `render_triangles_png` this performs **no**
+    /// readback and **no** PNG save, so it is a measurable frame unit for
+    /// benchmarks: encode + submit + GPU execution + present-sync.
+    pub fn render_triangles(
+        &self,
+        tris: &[Triangle],
+        camera: &GpuCamera,
+    ) -> anyhow::Result<()> {
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("bench-color-target"),
+            size: wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bench-enc"),
+            });
+        self.record_pass(&mut encoder, tris, camera, &target_view)?;
+        self.queue.submit(Some(encoder.finish()));
+        // Block until the GPU has actually executed the submitted work. This is the
+        // frame's real cost proxy (no surface present, no readback).
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        Ok(())
+    }
 }
 
 const VOXEL_WGSL: &str = r#"

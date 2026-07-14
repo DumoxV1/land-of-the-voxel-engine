@@ -215,6 +215,29 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - Verificatie: cargo build --workspace --examples 0 errors; cargo test 58/58 groen (ongewijzigd);
   gpu_world offscreen PNG intact (16.270 tris, visueel OK); gpu_window startup-log bevestigd
   ("GPU scene initialized (Bgra8UnormSrgb)"), 12s runtime zonder crash.
-- Commit 9bc1fa0 -> origin/main. Geen drift vs plan; Fase 2a voltooid.
+- Commit + push naar origin main (grens A) volgt.
 - Volgende: Fase-2 benchmark-gate (B-06/B-07/FPS op 1 km²) vóór ADR-0004 lock-in, dan
   chunk-streaming (S-12 deel 3).
+
+## 2026-07-15 (sessie 4) — S-12c deel 1: Fase-2 FPS-benchmark-gate op 1 km²
+- Bronnen gelezen: git log/status (schoon, S-12b laatste commit), PROJECT_STATE.md (was
+  achtergebleven bij "Fase 0 / S-11" — plan-drift gecorrigeerd naar S-12b), ROADMAP.md,
+  alignment-log, voxel-gpu renderer.rs/gpu_window.rs/gpu_world.rs (A-PI voor benchmark).
+- Verificatie vooraf: cargo test --workspace **58/58 groen**, cargo build --workspace --examples
+  schoon (gpu_window.exe gebouwd). PROJECT_STATE.md bijgewerkt + gepushed (master->origin/main,
+  branch heet lokaal `master` met upstream origin/main).
+- S-12c deel 1 = Fase-2 benchmark-gate: `GpuScene::render_triangles` (offscreen, géén
+  readback/PNG) toegevoegd als meetbare frame-A-PI; nieuw `examples/gpu_bench.rs` met
+  view-distance chunk-streamer + frametime-meting (p50/p95/p99) naar `bench_1km2.json`.
+  Strict: géén wijziging aan bewezen S-10/S-12b renderer-gedrag.
+- Uitslag op RTX 4080 (32×32 chunks = 1,05 km², radius 8, 300 frames, 1024×768):
+  **avg 8,8 FPS**, p50 129 ms / p95 141 ms / p99 151 ms, ~1,25 M zichtbare tris/frame.
+  **Gate NIET gehaald.** Oorzaak = scene-samenstelling (geen frustum-culling, geeen
+  distance-budget, per-frame VBO), niet de renderer-pipeline.
+- Analyse + besluit vastgelegd in `docs/benchmarks/2026-07-15-fase2-fps-1km2.md`.
+  ADR-0004 lock-in uitgesteld totdat de scene efficienter is (frustum-culling + budget).
+- ROADMAP + PROJECT_STATE bijgewerkt. Geen drift vs canoniek plan; géén architectuurwijziging.
+- Volgende (S-12c deel 2): frustum-culling + triangle-distance-budget + buffer-pooling in de
+  streamer, dan hermeten; pas bij gezonde FPS → ADR-0004 naar Accepted. Reproduceerbaarheid
+  van de bench nog te bevestigen met een 2e run (<10% afwijking).
+- Commit + push naar origin main (grens A) volgt.
