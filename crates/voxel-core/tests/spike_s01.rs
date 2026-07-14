@@ -45,7 +45,8 @@ fn uniform_chunk_get_set_and_state() {
     let new_mat: MaterialId = 7u8.into();
     chunk.set(LocalVoxel::new(1, 2, 3), new_mat);
     assert_eq!(chunk.get(LocalVoxel::new(1, 2, 3)), new_mat);
-    assert_eq!(chunk.state(), ChunkState::NonUniform);
+    // One differing voxel -> two distinct materials (0 and 7) -> PalettePacked (<=16 materials).
+    assert_eq!(chunk.state(), ChunkState::PalettePacked);
 }
 
 #[test]
@@ -57,7 +58,7 @@ fn edit_idempotence_duplicate_rejected() {
         MaterialId::from(1u8),
         EditId::new(1),
     );
-    let duplicate = first.clone();
+    let duplicate = first;
     assert!(first.conflicts_with(&duplicate).is_none(),
         "identical edit at same revision is idempotent (no conflict)");
     let later = Edit::new(

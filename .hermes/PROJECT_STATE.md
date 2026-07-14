@@ -19,15 +19,16 @@ Een filmische, zeer rijke en dynamische openwereld-RPG op een eigen micro-voxelf
 Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontroleerd en wordt plan-alignment expliciet vastgelegd in `docs/governance/alignment-log.md`.
 
 **Status:** researchreview en plansynthese VOLTOOID  \
-**Actieve fase:** Fase 0 → engine-startgate GEOPEND (S-01 voxel-core onder strict TDD)  \
-**Laatste update:** 2026-07-14
+**Actieve fase:** Fase 0 → engine-startgate GEOPEND (S-01 voxel-core + S-01-hardening onder strict TDD)  \
+**Laatste update:** 2026-07-15
 
 ## Volgende gates
 1. ✅ Onafhankelijke gratis reviewer corrigeerde bewijs, licenties, verzonnen/ongeverifieerde metrics en scope (review-initial-bundle.md, B-01…B-08).
 2. ✅ Gratis architect synthetiseerde uitsluitend geverifieerde resultaten naar ADR-spikes (adr/0001–0003) en planupdates.
 3. ✅ Exact implementatieplan voor de eerste `voxel-core` tracer bullet (S-01) geschreven (zie `.hermes/plans/spike-s01-voxel-core.md`).
-4. ⏳ S-01 onder strict TDD: failing tests eerst (rood), dan implementatie (groen). Repo scaffold + `voxel-core` crate.
-5. ⏳ Na S-01 groen: pas daarna repository/toolchain-hardening en enginecode volgende spike.
+4. ✅ S-01 onder strict TDD: failing tests eerst (rood), dan implementatie (groen). Repo scaffold + `voxel-core` crate.
+5. ✅ S-01-hardening: drie chunk-states (`Uniform`/`PalettePacked`/`Dense`) + 4-bit bitpacking + per-chunk palette (≤16), byte-stabiel versie-2 formaat. 7 nieuwe failing tests → groen.
+6. ⏳ Na S-01-hardening groen: S-03 renderer/camera spike (wgpu headless of software raster) om mesher-output zichtbaar te maken; eerst toolchain/dependency hardening.
 
 ## Auditwaarschuwing
 Researchmemo’s zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.

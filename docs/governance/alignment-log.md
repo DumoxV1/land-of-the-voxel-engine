@@ -72,3 +72,20 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - Verplichte terugstap: plan-alignment OK, project guard suite 3/3 groen, workspace-tests groen, budgetguard project-key spent $27,5299 (paid blijft dicht). Geen drift t.o.v. canoniek plan.
 - Commit + push naar origin main (grens A): S-02 tracer-bullet plan, voxel-mesher crate, alignment-log update.
 - Planstatus: aligned. Volgende stap: S-01-hardening (dense/palette chunk states) of S-03 (renderer/camera spike) — keuze autonoom volgende sessie.
+
+## 2026-07-15 — S-01-hardening voltooid (strict TDD) + verplichte terugstap na uitvoeringsstap 3
+- Autonome keuze: S-01-hardening boven S-03 — eerst waterdichtheid van voxelopslag borgen (drie chunk-states + 4-bit bitpacking) vóór renderer-spike; sluit aan op USER INPUT-kaart t_b624d2cb (optie A) en de sessie-takenlijst.
+- ADR-0001 verplicht drie chunk-states + per-chunk palette (≤16 materialen), bitpacked materiaal-ID's. Voor S-01 bestond alleen `Uniform`/`NonUniform(dense)`.
+- Strict TDD:
+  - ROOD: `tests/spike_s01_hardening.rs` (7 failing tests) + `spike_s01.rs` aangepast naar `ChunkState::PalettePacked`/`Dense`. `cargo test -p voxel-core` faalde met "no method named `palette`/`packed_data`" en "no variant `PalettePacked`/`Dense`".
+  - GROEN: `src/chunk.rs` herschreven naar `Uniform | PalettePacked | Dense` met 4-bit bitpacking (2 voxels/byte via `write_nibble`), per-chunk palette (`PALETTE_LIMIT=16`), automatische promotie naar `Dense` bij >16 materialen. `src/serialize.rs` naar versie-2 byte-stabiel formaat (header 15 B + palette-len + palette + packed / dense).
+  - Twee test-bugs zelf gevonden en gecorrigeerd tijdens TDD (verkeerde `HEADER_LEN=12`→15; verkeerde `flat()`-orde in bitpacking-test) — implementatie was correct.
+- Verificatie:
+  - `cargo test --workspace`: 19 tests groen (voxel-core 13: 1 lib-unit + 5 spike_s01 + 7 spike_s01_hardening; voxel-mesher 6). S-02 ongewijzigd groen (gebruikt alleen `chunk.get()`).
+  - `cargo test -p voxel-core --features proptest`: property-roundtrip groen.
+  - `cargo clippy -p voxel-core --all-targets`: schoon op nieuwe code; 1 overgebleven style-warning in bestaande S-01 spike (`i64->i64` cast) buiten hardening-scope gelaten (geen drive-by refactor).
+  - Renderer-agnostisch (ADR-0002): geen godot/bevy/wgpu in `voxel-core/Cargo.toml`; geen renderer-import in code. Bevestigd.
+- Geheugenbudget: `PalettePacked` = N³/2 bytes (16.384 B voor 32³) vs `Dense` = N³ bytes (32.768 B); `Uniform` = 0. Voldoet aan "≤4 B/actieve voxel"-target van ADR-0001 bij gemiddeld <16 materialen.
+- Verplichte terugstap: plan-alignment OK (canoniek plan + ADR's 0001–0003 intact); budgetguard project-key spent $27,5299 (onder €30 → paid blijft dicht; ver onder $36 stop). Geen drift t.o.v. canoniek plan. Geen betaalde calls deze sessie; alles lokaal + gratis `:free`.
+- Volgende stap (autonoom): S-03 renderer/camera spike (wgpu headless of software raster) om mesher-output zichtbaar te maken — nu veilig mogelijk omdat voxelopslag waterdicht is.
+- Commit + push naar origin main (grens A) volgt na deze terugstap.
