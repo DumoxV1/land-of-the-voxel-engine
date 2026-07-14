@@ -1,44 +1,57 @@
 # Land of the Voxel Engine
 
 Een technisch ambitieuze, filmische 3D **micro-voxel** openwereld-RPG-engine in pure Rust.
-Server-authoritative, deterministisch, persistent — en (voor de eerste slice) volledig
-headless runbaar **zonder GPU**.
+Server-authoritative, deterministisch, persistent — en een **interactieve GPU-client**
+(wgpu/Vulkan op je RTX 4080) die een 12,5 cm-voxel-wereld streamt en rendert.
 
 ## Status (2026-07-15)
-Vertical slice bereikt (spikes S-01..S-09, allen onder strict TDD). Zie
-[`.hermes/PROJECT_STATE.md`](.hermes/PROJECT_STATE.md) en [`docs/governance/alignment-log.md`](docs/governance/alignment-log.md).
+Vertical slice bereikt (spikes S-01..S-13, allen onder strict TDD). Micro-voxel-resolutie
+**12,5 cm/voxel** (ADR-0005); interactieve wgpu-client met chunk-streaming (S-12b/S-13).
+Zie [` .hermes/PROJECT_STATE.md`](.hermes/PROJECT_STATE.md) en
+[`docs/governance/alignment-log.md`](docs/governance/alignment-log.md).
 
 | Crate | Wat het doet |
 |-------|--------------|
-| `voxel-core` | Chunk (3 states + 4-bit bitpacking), byte-stabiele serialisatie |
+| `voxel-core` | Chunk (3 states + 4-bit bitpacking), byte-stabiele serialisatie, coördinaten (12,5 cm-schaal) |
 | `voxel-mesher` | Greedy meshing (chunk → driehoeken) |
 | `voxel-render` | Pure-Rust software-rasterizer → PNG (geen GPU) |
 | `voxel-worldgen` | Deterministische, seeded terrain-generatie |
 | `voxel-world` | Multi-chunk wereldstore (cache + edits) |
-| `voxel-edit` | Edit-events + append-only log (replay/persistence) |
+| `voxel-edit` | Edit-events + append-only log (replay/persistentie) |
 | `voxel-persist` | Save/load wereld als (seed + edit-log) |
 | `voxel-player` | First-person spelercontroller + voxel-collision |
 | `voxel-server` | **Headless authoritative server (geen GPU)** |
+| `voxel-gpu` | **wgpu GPU-renderer + interactieve client (WASD + muis-look)** |
 
 ## Wat je nu kunt runnen
 
-### 1. De headless server (GPU-vrij — het runbare artifact)
+### 1. De interactieve GPU-client (12,5 cm micro-voxels, rondlopen!)
+```bash
+cargo run --release --example gpu_window -p voxel-gpu
+```
+Opent een venster en streamt een 12,5 cm-voxel-wereld rond een first-person free-fly
+camera. **WASD** = vliegen, **links-sleepen** = rondkijken. Sluit het venster om te stoppen.
+Spawn = op de terrain-hoogte; view-distance ~96 m (24 chunks). Vereist een GPU
+(RTX 4080 / Vulkan).
+
+### 2. De headless server (GPU-vrij — het runbare artifact)
 ```bash
 cargo run --example headless_server -p voxel-server
 ```
 Spawn 3 spelers, simuleert 600 ticks, plaatst een "beacon"-edit, en print een
-state-samenvatting. Bewijs dat de engine een server draait zónder renderer/GPU.
+state-samenvatting. Bewijst dat de engine een server draait zónder renderer/GPU.
 
-### 2. Tests (hele workspace)
+### 3. Tests (hele workspace)
 ```bash
 cargo test --workspace
 ```
-Verwacht: 48 tests groen.
+Verwacht: **60 tests groen**.
 
-### 3. Demo-PNG's genereren (software-rasterizer)
+### 4. Demo-PNG's genereren (software-rasterizer / GPU)
 ```bash
 cargo run --example demo        -p voxel-render   # enkele chunk
-cargo run --example demo_worldgen -p voxel-render # terrain
+cargo run --release --example gpu_world -p voxel-gpu   # GPU-render naar gpu_world.png
+```
 cargo run --example demo_world   -p voxel-render   # 2x2 chunks + toren-edit
 cargo run --example demo_persist -p voxel-render   # save -> load -> render
 cargo run --example demo_player  -p voxel-render   # first-person grond-view

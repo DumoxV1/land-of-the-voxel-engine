@@ -266,3 +266,27 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - Volgende: S-12c deel 2 (frustum-culling + budget + buffer-pooling) voor de 1 km²-FPS-gate op
   12,5 cm-schaal; worldgen-noise fijnere schaal (advies #6); first-person player-camera op 12,5 cm.
 - Commit + push naar origin main (grens A) volgt.
+
+## 2026-07-15 (sessie 6) — S-13b: live micro-voxel client (erin rondkijken & lopen)
+- Gebruikerswens: de GPU-client moet een wereld streamen die je **live kunt open + rondlopen**
+  op de 12,5 cm-schaal (S-13 / ADR-0005). Voorheen was `gpu_window` een 2×2-chunk
+  stub (4×4 m op 12,5 cm = een stipje) — niet wandelbaar.
+- `gpu_window.rs` volledig herschreven naar **live chunk-streaming first-person client**:
+  - Wereld = lazy (World genereert chunks on-demand), géén startup-2×2-limit.
+  - Elke frame: chunks binnen `VIEW_RADIUS=24` (~96 m) van de camera worden gegenereerd +
+    gemesht (cache), `tris` herbouwd, gerendered via `render_to_view`.
+  - First-person spawn: terrain-top gemeten bij spawn-chunk → eye ~3 voxels (37,5 cm) erboven.
+  - WASD free-fly (speed 0,8 m/s × 8 voxels/m = 6,4 voxels/s) + links-drag mouse-look
+    (bestaande input behouden).
+- Headless smoke-test `client_smoke.rs` (zelfde streaming-path, géén winit-venster) bevestigt:
+  **120/120 frames gerendered, géén panic**, spawn terrain-top=28 voxels (~3,5 m), eye 3,88 m.
+- Build: `cargo build --release --example gpu_window` schoon (geén errors). README bijgewerkt
+  (status → S-13, 60 tests, GPU-client run-instructie toegevoegd). ROADMAP + alignment-log
+  + PROJECT_STATE bijgewerkt. Geen drift vs canoniek plan.
+- **Verificatie-limiet:** de interactieve venster-ervaring (erin kijken/lopen) is iets de
+  **gebruiker** zelf moet doen op zijn RTX 4080-pc met scherm (`cargo run --release
+  --example gpu_window -p voxel-gpu`). Headless kon ik alleen de streaming-render-path
+  bevestigen (smoke-test), niet het visuele venster.
+- Volgende: S-12c deel 2 (frustum-culling) voor de 1 km²-FPS-gate op 12,5 cm; daarna
+  worldgen-noise fijner (advies #6) zodat terrain op micro-schaal écht detail toont.
+- Commit + push naar origin main (grens A) volgt.

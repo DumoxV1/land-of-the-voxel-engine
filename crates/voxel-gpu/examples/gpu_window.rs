@@ -1,10 +1,11 @@
-//! S-12b demo: interactive winit window rendering the voxel world on the GPU (wgpu 30).
+//! S-12b / S-13 live GPU client: stream a micro-voxel world (12.5 cm/voxel) around
+//! a first-person free-fly camera (WASD + mouse-look). Chunks within `VIEW_RADIUS`
+//! of the camera are generated + meshed on the fly (chunk-streaming), so you can
+//! walk/fly through a real, open world — not a 2x2 stub.
 //!
-//! Opens a live window, meshes a chunk block, and renders it with a free-fly camera
-//! controlled by WASD + mouse-look. Proves the engine runs interactively on the GPU.
-//!
-//! Run with: cargo run --example gpu_window -p voxel-gpu
+//! Run with: cargo run --release --example gpu_window -p voxel-gpu
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
@@ -12,16 +13,22 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes};
 
-use voxel_core::coords::ChunkCoord;
+use voxel_core::coords::{ChunkCoord, CHUNK_SIZE};
 use voxel_gpu::renderer::{GpuCamera, GpuScene};
 use voxel_mesher::greedy_mesh;
+use voxel_mesher::Triangle;
 use voxel_world::World;
+
+/// View distance in chunks. On the 12.5 cm scale a 4 m chunk -> 32 chunks ~= 128 m view.
+const CHUNK_M: f32 = CHUNK_SIZE as f32 * 0.125; // 4 m (ADR-0005)
+const VIEW_RADIUS: i64 = 24; // ~96 m view radius
 
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
     scene: Option<GpuScene>,
-    tris: Vec<voxel_mesher::Triangle>,
+    world: World,
+    mesh_cache: HashMap<ChunkCoord, Vec<Triangle>>,
     camera: GpuCamera,
     // Input state.
     keys: std::collections::HashSet<winit::keyboard::PhysicalKey>,
@@ -30,7 +37,7 @@ struct App {
     // Mouse-look drag state.
     dragging: bool,
     last_mouse: Option<(f64, f64)>,
-    // Max texture dimension of the adapter (surface size must stay within this).
+    // Max texture dimension of the adapter.
     max_dim: u32,
 }
 
@@ -40,11 +47,13 @@ impl Default for App {
             window: None,
             surface: None,
             scene: None,
-            tris: Vec::new(),
-            camera: GpuCamera::new([16.0, 55.0, 90.0], -std::f32::consts::FRAC_PI_2, -0.5, 1.0),
+            world: World::new(7),
+            mesh_cache: HashMap::new(),
+            // First-person spawn: eye height set after we know the terrain in resumed().
+            camera: GpuCamera::new([40.0, 50.0, 40.0], -std::f32::consts::FRAC_PI_2, -0.4, 1.0),
             keys: std::collections::HashSet::new(),
             yaw: -std::f32::consts::FRAC_PI_2,
-            pitch: -0.5,
+            pitch: -0.4,
             dragging: false,
             last_mouse: None,
             max_dim: 2048,
@@ -58,8 +67,8 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("Land of the Voxel Engine — GPU client")
-            .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0));
+            .with_title("Land of the Voxel Engine — GPU client (12.5 cm micro-voxels)")
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -116,9 +125,7 @@ impl ApplicationHandler for App {
             .find(|f| f.is_srgb())
             .unwrap_or(capabilities.formats[0]);
 
-        // Clip the surface size to a safe maximum. The default downlevel surface on this
-        // adapter does not accept textures larger than 2048 per dimension (DPI scaling can
-        // push the physical window size well past that and make Surface::configure panic).
+        // Clip the surface size to a safe maximum (DPI scaling can push past the adapter limit).
         let max_dim: u32 = 2048;
         let surf_w = size.width.min(max_dim);
         let surf_h = size.height.min(max_dim);
@@ -146,11 +153,37 @@ impl ApplicationHandler for App {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(scene.device(), &config);
-
         self.window = Some(window);
         self.surface = Some(surface);
         self.scene = Some(scene);
-        // Start the render loop.
+
+        // First-person spawn: drop the camera onto the terrain at the spawn chunk.
+        let spawn = ChunkCoord::new(1, 0, 1);
+        let chunk = self.world.get_or_generate(spawn);
+        let mut top = 0i64;
+        for lx in 0..CHUNK_SIZE as u8 {
+            for lz in 0..CHUNK_SIZE as u8 {
+                for ly in (0..CHUNK_SIZE as u8).rev() {
+                    if chunk.get(voxel_core::coords::LocalVoxel::new(lx, ly, lz)).0 != 0 {
+                        if (ly as i64) > top {
+                            top = ly as i64;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        // Eye ~3 voxels (37.5 cm) above the surface, at the chunk center.
+        let eye_x = 1.5 * CHUNK_SIZE as f32 * 0.125;
+        let eye_z = 1.5 * CHUNK_SIZE as f32 * 0.125;
+        self.camera.eye = [eye_x, (top + 3) as f32, eye_z];
+        println!(
+            "spawn: terrain top = {} voxels (~{:.2} m), eye_y = {:.2} m",
+            top,
+            top as f32 * 0.125,
+            (top + 3) as f32 * 0.125
+        );
+
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -235,7 +268,8 @@ impl App {
         let (sp, cp) = self.pitch.sin_cos();
         let forward = [cy * cp, sp, sy * cp];
         let right = [cy, 0.0, sy];
-        let speed = 0.6;
+        // Movement speed in m/s -> voxels/s on the 12.5 cm scale (1 m = 8 voxels).
+        let speed = 0.8 * 8.0;
         if self.keys.contains(&winit::keyboard::PhysicalKey::Code(
             winit::keyboard::KeyCode::KeyW,
         )) {
@@ -268,13 +302,38 @@ impl App {
         let (Some(scene), Some(surface)) = (&self.scene, &self.surface) else {
             return;
         };
+
+        // --- Chunk-streaming: gather visible chunks within VIEW_RADIUS of the camera ---
+        let [ex, _ey, ez] = self.camera.eye;
+        let ccx = (ex / CHUNK_M).floor() as i64;
+        let ccz = (ez / CHUNK_M).floor() as i64;
+        let mut tris: Vec<Triangle> = Vec::new();
+        for dx in -VIEW_RADIUS..=VIEW_RADIUS {
+            for dz in -VIEW_RADIUS..=VIEW_RADIUS {
+                let cx = ccx + dx;
+                let cz = ccz + dz;
+                if cx < 0 || cz < 0 {
+                    continue;
+                }
+                let coord = ChunkCoord::new(cx, 0, cz);
+                let entry = self.mesh_cache.entry(coord).or_insert_with(|| {
+                    let chunk = self.world.get_or_generate(coord);
+                    greedy_mesh(&chunk)
+                });
+                tris.extend_from_slice(entry);
+            }
+        }
+        if tris.is_empty() {
+            return;
+        }
+
         let frame = surface.get_current_texture();
         let tex = match frame {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             _ => return,
         };
         let view = tex.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        if scene.render_to_view(&self.tris, &self.camera, &view).is_ok() {
+        if scene.render_to_view(&tris, &self.camera, &view).is_ok() {
             scene.queue().present(tex);
         }
     }
@@ -282,23 +341,12 @@ impl App {
 
 fn main() {
     env_logger::init();
-    // Build the world + mesh once.
-    let mut world = World::new(7);
-    let mut tris = Vec::new();
-    for cx in 0..2i64 {
-        for cz in 0..2i64 {
-            let coord = ChunkCoord::new(cx, 0, cz);
-            let chunk = world.get_or_generate(coord);
-            for t in greedy_mesh(&chunk) {
-                tris.push(t);
-            }
-        }
-    }
-    println!("meshed {} triangles across 4 chunks", tris.len());
-
+    println!(
+        "Land of the Voxel Engine — micro-voxel client (12.5 cm/voxel, {} m chunks, view radius {} chunks ~{:.0} m)",
+        CHUNK_M, VIEW_RADIUS, VIEW_RADIUS as f32 * CHUNK_M
+    );
+    println!("WASD = fly, Left-drag = look. Close window to exit.");
     let mut app = App::default();
-    app.tris = tris;
-
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.run_app(&mut app).expect("run app");
 }

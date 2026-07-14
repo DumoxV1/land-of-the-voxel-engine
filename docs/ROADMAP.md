@@ -45,6 +45,12 @@ Bevy/wgpu (ADR-0004, status Proposed).
       met offscreen-pad. Geverifieerd: "GPU scene initialized (Bgra8UnormSrgb)".
 - [x] **Interactieve GPU-client**: winit-venster + render-loop + camera-input (WASD + muis).
       Vervangt offscreen-PNG door een live venster dat de `World` rendert (S-12b).
+- [x] **Live micro-voxel client (S-13, 2026-07-15)**: `gpu_window` streamt een 12,5 cm-
+      voxel-wereld rond een first-person free-fly camera (WASD + links-sleep = look),
+      chunk-streaming binnen view-radius 24 (~96 m). Spawn = op terrain-hoogte.
+      Headless smoke-test (`client_smoke`) bevestigt de streaming-path: 120/120 frames,
+      géén panic. `cargo run --release --example gpu_window -p voxel-gpu` = rondlopen.
+      Zie README "Wat je nu kunt runnen".
 - [x] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
       **S-12c deel 1 GEDAAN (2026-07-15):** GPU-benchmark-harness (`examples/gpu_bench.rs` +
       `GpuScene::render_triangles` offscreen-pad) meet FPS op 1 km² (1024 chunks, RTX 4080).
