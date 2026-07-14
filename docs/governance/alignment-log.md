@@ -264,7 +264,31 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
   coords/worldgen/physics. Impressie-set (23 PNG/JPG) verzameld in docs/research/impressie-microvoxel/.
 - ROADMAP + PROJECT_STATE + alignment-log bijgewerkt. Geen drift vs canoniek plan.
 - Volgende: S-12c deel 2 (frustum-culling + budget + buffer-pooling) voor de 1 km²-FPS-gate op
-  12,5 cm-schaal; worldgen-noise fijnere schaal (advies #6); first-person player-camera op 12,5 cm.
+  12,5 cm-schaal; worldgen-noise fijner (advies #6); first-person player-camera op 12,5 cm.
+- Commit + push naar origin main (grens A) volgt.
+
+## 2026-07-15 (sessie 7) — Mijlpaal 1 + 2: space-crash + lag fix (S-13b / S-12c deel 2)
+- Gebruiker rapporteerde: (a) client crasht bij spatie, (b) erg laggy. Nieuwe eis: best-of-best,
+  enorme FPS, 4K+ textures; roadmap volgen; onderzoek waar nodig; verslag per mijlpaal; géén
+  code-versoepeling.
+- **Mijlpaal 1 (space-crash):** rootcause = `get_current_texture()` gaf `Lost`/`Outdated` bij
+  focus-wissel (spatie → OS window-snap), oude code herstelde surface nooit → crash/hang. Fix:
+  bij `Lost`/`Outdated` herconfigureert client surface op laatst bekende grootte + skipt frame;
+  `Timeout`/`Occluded` → skipt. Gepushed (c1e1759..3d2157e).
+- **Onderzoek (3 subagents, gratis :free modellen):** wgpu 0.30 FPS-strategie (frustum-culling,
+  buffer-pooling, rayon-streaming, indirect-draw), 4K-texture-aanbeveling (texture-arrays per
+  materiaal, triplanar, PBR, BCn-compressie op 4080S), spacebar-fix-analyse. Allen naar
+  docs/research/ verplaatst. Bevestigen: P0 (per-frame alloc elimineren) = ~5–20×, P1
+  (frustum-culling) = ~3–10×, P0+P1 samen ~10–30×.
+- **Mijlpaal 2 (lag fix P0+P1):** `Frustum`-struct in `renderer.rs` (6 planes uit view_proj,
+  AABB-test) + unit-test (Rood→Groen). GPU buffer-pooling: één herbruikbare VBO in `GpuScene`,
+  `write_buffer` i.p.v. per-frame `create_buffer_init`, groeit alleen bij noodzaak. Client
+  `gpu_window` past frustum-culling per chunk toe. Regressie: 61/61 tests groen (60+1 nieuw).
+  Bench 1 km²: **8,8 → 15,8 avg FPS** (p50 129→55 ms = 2,3×). Benchmark-doc + ROADMAP bijgewerkt.
+- **Niet gedaan (wel gepland):** P3 rayon-meshing (non-blocking), P2 distance/triangle-budget,
+  staging-ring i.p.v. `write_buffer` (wgpu#1242 ~25 ms spike), Mijlpaal 3 = 4K-texture-system
+  (texture-arrays + PBR + triplanar op wgpu 0.30). Die volgen als aparte mijlpalen.
+- Geen drift vs canoniek plan/roadmap. Code niet versoepeld ondanks complexiteit.
 - Commit + push naar origin main (grens A) volgt.
 
 ## 2026-07-15 (sessie 6) — S-13b: live micro-voxel client (erin rondkijken & lopen)

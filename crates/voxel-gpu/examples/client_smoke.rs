@@ -18,7 +18,7 @@ const VIEW_RADIUS: i64 = 16;
 fn main() {
     futures::executor::block_on(async {
         let mut world = World::new(7);
-        let scene = GpuScene::new_offscreen(1024, 768)
+        let mut scene = GpuScene::new_offscreen(1024, 768)
             .await
             .expect("gpu scene");
         let mut cache: HashMap<ChunkCoord, Vec<Triangle>> = HashMap::new();

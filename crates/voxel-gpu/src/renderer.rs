@@ -99,6 +99,10 @@ pub struct GpuScene {
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
+    /// Pooled vertex buffer (S-12c deel 2): reused across frames via
+    /// `queue.write_buffer` instead of re-allocating a fresh VBO every frame.
+    vbo: Option<wgpu::Buffer>,
+    vbo_capacity: usize,
 }
 
 impl GpuScene {
@@ -264,6 +268,8 @@ impl GpuScene {
             width,
             height,
             format,
+            vbo: None,
+            vbo_capacity: 0,
         })
     }
 
@@ -303,13 +309,15 @@ impl GpuScene {
             width,
             height,
             format,
+            vbo: None,
+            vbo_capacity: 0,
         })
     }
 
     /// Upload vertices + camera, run the render pass into `target_view`, then return the
     /// vertex buffer handle (kept alive by the caller for the duration of the pass).
     fn record_pass<'a>(
-        &'a self,
+        &'a mut self,
         encoder: &'a mut wgpu::CommandEncoder,
         tris: &[Triangle],
         camera: &GpuCamera,
@@ -328,11 +336,26 @@ impl GpuScene {
         if verts.is_empty() {
             anyhow::bail!("no triangles to render");
         }
-        let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("voxel-vbo"),
-            contents: bytemuck::cast_slice(&verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        // --- Buffer pooling (S-12c deel 2): reuse one VBO across frames via
+        // write_buffer instead of re-allocating a fresh buffer every frame.
+        let needed = verts.len() * std::mem::size_of::<GpuVertex>();
+        let vbuf = match &self.vbo {
+            Some(b) if b.size() >= needed as u64 => b.clone(),
+            _ => {
+                // Grow (or init) the pool. Round up to a chunk to avoid thrashing.
+                let cap = (needed.max(1 << 20) * 2).next_multiple_of(1 << 20) as u64;
+                let b = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("voxel-vbo-pool"),
+                    size: cap,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.vbo_capacity = cap as usize;
+                self.vbo = Some(b.clone());
+                b
+            }
+        };
+        self.queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&verts));
 
         let cu = CameraUniform {
             view_proj: camera.view_proj(),
@@ -395,7 +418,7 @@ impl GpuScene {
 
     /// Render triangles to a PNG file (offscreen path — unchanged behaviour from S-10).
     pub async fn render_triangles_png(
-        &self,
+        &mut self,
         tris: &[Triangle],
         camera: &GpuCamera,
         path: &str,
@@ -494,7 +517,7 @@ impl GpuScene {
 
     /// Render triangles into an existing surface texture view (window path).
     pub fn render_to_view(
-        &self,
+        &mut self,
         tris: &[Triangle],
         camera: &GpuCamera,
         surface_view: &wgpu::TextureView,
@@ -518,7 +541,7 @@ impl GpuScene {
     /// readback and **no** PNG save, so it is a measurable frame unit for
     /// benchmarks: encode + submit + GPU execution + present-sync.
     pub fn render_triangles(
-        &self,
+        &mut self,
         tris: &[Triangle],
         camera: &GpuCamera,
     ) -> anyhow::Result<()> {
@@ -549,6 +572,80 @@ impl GpuScene {
         // frame's real cost proxy (no surface present, no readback).
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         Ok(())
+    }
+}
+
+/// Frustum culling for chunk streaming (S-12c deel 2).
+/// Extracts the 6 clip-space planes from a view-projection matrix (WebGPU
+/// clip space, z in [0,1]) and tests an axis-aligned bounding box (chunk AABB).
+/// Lets the client skip chunks entirely behind / outside the camera view,
+/// instead of meshing + uploading the whole view-radius every frame.
+pub struct Frustum {
+    /// (a, b, c, d) with plane equation a*x + b*y + c*z + d >= 0 = inside.
+    planes: [glam::Vec4; 6],
+}
+
+impl Frustum {
+    /// Build the 6 frustum planes from a column-major view-projection matrix
+    /// (as returned by `GpuCamera::view_proj`).
+    pub fn from_view_proj(vp: &[[f32; 4]; 4]) -> Self {
+        // vp is to_cols_array_2d(): vp[col][row]. Row-major extraction:
+        let m = vp;
+        // left, right, bottom, top, near, far (WebGPU z in [0,1])
+        let planes = [
+            // left  = row3 + row0
+            glam::Vec4::new(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0], m[3][3] + m[3][0]),
+            // right = row3 - row0
+            glam::Vec4::new(m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0], m[3][3] - m[3][0]),
+            // bottom= row3 + row1
+            glam::Vec4::new(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1], m[3][3] + m[3][1]),
+            // top   = row3 - row1
+            glam::Vec4::new(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1], m[3][3] - m[3][1]),
+            // near  = row2            (WebGPU z in [0,1])
+            glam::Vec4::new(m[0][2], m[1][2], m[2][2], m[3][2]),
+            // far   = row3 - row2
+            glam::Vec4::new(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]),
+        ];
+        Self { planes }
+    }
+
+    /// True if the AABB centered at `center` with half-extent `half` intersects
+    /// (or is inside) the frustum. Uses the standard "test all 8 corners per plane"
+    /// — a chunk is culled only if it is fully outside at least one plane.
+    pub fn intersects_aabb(&self, center: [f32; 3], half: f32) -> bool {
+        let c = glam::Vec3::new(center[0], center[1], center[2]);
+        for p in &self.planes {
+            let n = glam::Vec3::new(p.x, p.y, p.z);
+            let d = p.w;
+            // closest point on the AABB to the plane normal
+            let px = c.x + (if n.x >= 0.0 { half } else { -half });
+            let py = c.y + (if n.y >= 0.0 { half } else { -half });
+            let pz = c.z + (if n.z >= 0.0 { half } else { -half });
+            // if the closest corner is outside this plane, the whole box is outside
+            if n.x * px + n.y * py + n.z * pz + d < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frustum_culls_behind_camera() {
+        // Camera at origin, yaw=-pi/2 -> forward = (0,0,-1) (looks down -Z), fov 60°, aspect 1.
+        let cam = GpuCamera::new([0.0, 0.0, 0.0], -std::f32::consts::FRAC_PI_2, 0.0, 1.0);
+        let vp = cam.view_proj();
+        let f = Frustum::from_view_proj(&vp);
+        // Chunk 10 m in front (-Z) -> visible.
+        assert!(f.intersects_aabb([0.0, 0.0, -10.0], 2.0), "chunk in front (-Z) should be visible");
+        // Chunk 10 m behind (+Z) -> culled.
+        assert!(!f.intersects_aabb([0.0, 0.0, 10.0], 2.0), "chunk behind (+Z) should be culled");
+        // Chunk far to the side (+X 50 m) -> culled.
+        assert!(!f.intersects_aabb([50.0, 0.0, -10.0], 2.0), "chunk far to the side should be culled");
     }
 }
 

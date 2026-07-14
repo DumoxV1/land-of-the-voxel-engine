@@ -1,16 +1,16 @@
 {
   "spike": "S-12c-fase2-benchmark-gate",
   "gpu": "RTX 4080 Super",
-  "side_chunks": 4,
-  "world_area_m2": 16384,
-  "view_radius_chunks": 3,
-  "frames": 30,
-  "render_w": 512,
-  "render_h": 384,
-  "avg_visible_triangles": 52212,
-  "p50_ms": 1.825,
-  "p95_ms": 2.080,
-  "p99_ms": 2.574,
-  "avg_ms": 1.872,
-  "avg_fps": 534.20
+  "side_chunks": 32,
+  "world_area_m2": 1048576,
+  "view_radius_chunks": 8,
+  "frames": 300,
+  "render_w": 1024,
+  "render_h": 768,
+  "avg_visible_triangles": 1165197,
+  "p50_ms": 54.988,
+  "p95_ms": 100.805,
+  "p99_ms": 105.149,
+  "avg_ms": 63.418,
+  "avg_fps": 15.77
 }

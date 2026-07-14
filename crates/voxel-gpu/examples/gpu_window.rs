@@ -312,9 +312,14 @@ impl App {
     }
 
     fn render_frame(&mut self) {
-        let (Some(scene), Some(surface)) = (&self.scene, &self.surface) else {
+        let (Some(scene), Some(surface)) = (&mut self.scene, &self.surface) else {
             return;
         };
+
+        // --- Frustum culling (S-12c deel 2): only stream chunks inside the view.
+        let frustum = voxel_gpu::renderer::Frustum::from_view_proj(&self.camera.view_proj());
+        let half = CHUNK_M * 0.5; // 2 m half-extent (x/z)
+        let half_y = CHUNK_M * 1.5; // terrain is <= ~1 chunk tall, pad for height
 
         // --- Chunk-streaming: gather visible chunks within VIEW_RADIUS of the camera ---
         let [ex, _ey, ez] = self.camera.eye;
@@ -326,6 +331,15 @@ impl App {
                 let cx = ccx + dx;
                 let cz = ccz + dz;
                 if cx < 0 || cz < 0 {
+                    continue;
+                }
+                // Frustum cull: skip chunks fully outside the camera view.
+                let center = [
+                    (cx as f32 + 0.5) * CHUNK_M,
+                    half_y,
+                    (cz as f32 + 0.5) * CHUNK_M,
+                ];
+                if !frustum.intersects_aabb(center, half.max(half_y)) {
                     continue;
                 }
                 let coord = ChunkCoord::new(cx, 0, cz);

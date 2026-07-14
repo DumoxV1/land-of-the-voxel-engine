@@ -40,7 +40,7 @@ fn main() {
 
     futures::executor::block_on(async {
         let mut world = World::new(7);
-        let scene = GpuScene::new_offscreen(w, h)
+        let mut scene = GpuScene::new_offscreen(w, h)
             .await
             .expect("gpu scene init");
 

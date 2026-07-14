@@ -54,6 +54,15 @@ Bevy/wgpu (ADR-0004, status Proposed).
       surface nooit). Nu: bij `Lost`/`Outdated` herconfigureert de client de surface op
       laatst bekende grootte + skipt frame; `Timeout`/`Occluded` → skipt. Space = gewone
       toets. Compileert schoon. (Volgende: lag fixen = S-12c deel 2 frustum-culling.)
+- [x] **Mijlpaal 2 (S-12c deel 2, 2026-07-15): lag fix P0+P1**. Frustum-culling
+      (`Frustum` in `renderer.rs`, unit-test Rood→Groen) + GPU buffer-pooling (geen
+      per-frame `create_buffer_init` meer, maar één herbruikbare VBO via `write_buffer`,
+      groeit alleen bij noodzaak). Resultaat: bench 1 km² (32×32 chunks, r8) stijgt van
+      **8,8 → 15,8 avg FPS** (p50 129→55 ms = 2,3×). 61/61 tests groen. Let op: bench
+      meet alleen P0 (pooling); client-culling (P1) komt daar nog bovenop bij `gpu_window`.
+      Onderzoek (3 subagents) bevestigt P0+P1 ≈ 10–30× potentieel; P0 `write_buffer`
+      kan nog ~25 ms spike geven (wgpu#1242) → vervolg: staging-ring + `copy_buffer_to_buffer`.
+      Advies #2/#3 uit SOTA-onderzoek gevolgd.
 - [x] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
       **S-12c deel 1 GEDAAN (2026-07-15):** GPU-benchmark-harness (`examples/gpu_bench.rs` +
       `GpuScene::render_triangles` offscreen-pad) meet FPS op 1 km² (1024 chunks, RTX 4080).
