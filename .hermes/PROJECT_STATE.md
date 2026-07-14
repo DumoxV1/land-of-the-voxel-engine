@@ -19,7 +19,7 @@ Een filmische, zeer rijke en dynamische openwereld-RPG op een eigen micro-voxelf
 Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontroleerd en wordt plan-alignment expliciet vastgelegd in `docs/governance/alignment-log.md`.
 
 **Status:** researchreview en plansynthese VOLTOOID  \
-**Actieve fase:** Fase 0 → engine-startgate GEOPEND (S-01 voxel-core + S-01-hardening + S-02 mesher + S-03 software-raster + S-04 worldgen + S-05 world-store onder strict TDD)  \
+**Actieve fase:** Fase 0 → engine-startgate GEOPEND (S-01..S-07 onder strict TDD: voxel-core, hardening, mesher, software-raster, worldgen, world-store, edit-tool, persist)  \
 **Laatste update:** 2026-07-15
 
 ## Volgende gates
@@ -31,8 +31,10 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
 6. ✅ S-01-hardening: drie chunk-states (`Uniform`/`PalettePacked`/`Dense`) + 4-bit bitpacking + per-chunk palette (≤16), byte-stabiel versie-2 formaat. 7 nieuwe failing tests → groen.
 7. ✅ S-03 software-raster spike: `voxel-render` crate, `Camera` (perspectief) + `render_scene` (z-buffer, per-normaal shading) → PNG. 3 failing tests → groen; demo-PNG gegenereerd en visueel geverifieerd (voxel-scène herkenbaar). Geen GPU/renderer-dep in core-crates (ADR-0002).
 8. ✅ S-04 deterministische worldgen spike: `voxel-worldgen` crate, `generate_chunk(coord, seed)` (seeded value-noise heightmap, grass/dirt/stone lagen). 5 failing tests → groen (determinisme, seed-verschil, chunk-grenscontinuïteit, niet-leeg, laagstructuur). demo_worldgen.png visueel geverifieerd als rollende, scheurvrije terrain. Renderer-agnostisch (alleen voxel-core).
-9. ✅ S-05 multi-chunk world-store spike: `voxel-world` crate, `World` (HashMap cache + seed-generatie + edits + dirty-set). 4 failing tests → groen (cache/determinisme, edit-persistentie, grensoverschrijdende continuïteit, dirty-marking). `render_world` in voxel-render + `demo_world.png` (2x2 chunks + metalen toren-edit) visueel geverifieerd. Renderer-agnostisch.
-10. ⏳ Volgende: S-06 (edit/place-remove tool + revisie), S-07 (save/load seed+edits), S-08 (spelercontroller + camera in wereld), S-09 (headless dedicated server). Client-shell (ADR-0004) loopt als subagent (deleg_4c7b3b6d) — keuze Godot vs Bevy/wgpu wordt als ADR vastgelegd, niet stil aangenomen. Doel: werkende vertical slice (runeerbaar artifact) voor de gebruiker.
+9. ✅ S-05 multi-chunk world-store spike: `voxel-world` crate, `World` (HashMap cache + seed-generatie + edits + dirty-set). 4 failing tests → groen. `render_world` + `demo_world.png` visueel geverifieerd.
+10. ✅ S-06 edit/place-remove tool + edit-events: `voxel-edit` crate, `Edit` (world/old/new/actor/tick/revision) + `EditLog` (append-only, monotoon) + `EditTool::place/remove`. 4 failing tests → groen (old-capture, monotone revisies, tool update, replay-reproductie).
+11. ✅ S-07 persistence (save/load seed+edits): `voxel-persist` crate, eigen binair formaat (magic+seed+edits), `save_world`/`load_world`/`PersistError`. 3 failing tests → groen (round-trip reproductie, log-behoud, corrupt→Err). `demo_persist.png` bewijst save→load→toren-herstel. Renderer-agnostisch.
+12. ⏳ Volgende: S-08 (spelercontroller + camera in wereld), S-09 (headless dedicated server). ADR-0004 (client-shell) loopt als subagent (deleg_4c7b3b6d). Doel: werkende vertical slice (runeerbaar artifact). Autonome volmacht gebruiker: doorbouwen tot runnable product.
 
 ## Auditwaarschuwing
 Researchmemo’s zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.

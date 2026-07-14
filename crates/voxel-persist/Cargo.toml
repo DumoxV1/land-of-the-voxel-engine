@@ -1,16 +1,10 @@
 [package]
-name = "voxel-render"
+name = "voxel-persist"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 voxel-core = { path = "../voxel-core" }
-voxel-mesher = { path = "../voxel-mesher" }
-image = "0.25"
-
-[dev-dependencies]
-voxel-worldgen = { path = "../voxel-worldgen" }
 voxel-world = { path = "../voxel-world" }
 voxel-edit = { path = "../voxel-edit" }
-voxel-persist = { path = "../voxel-persist" }

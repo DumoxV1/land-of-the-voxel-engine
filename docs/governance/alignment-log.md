@@ -146,3 +146,13 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - Verplichte terugstap (na 3e uitvoeringsstap): plan-alignment OK (canoniek plan + ADR's 0001–0003 + S-05 plan intact). S-01-hardening review verwerkt (9056d81). Budgetguard project-key spent $27,5299 (onder €30 → paid blijft dicht; ver onder $36 stop). Geen drift; geen betaalde calls (alles lokaal + gratis `:free`). ADR-0004 (client-shell) loopt als subagent (deleg_4c7b3b6d); wordt als aparte log-entry + ADR-bestand verwerkt zodra binnen.
 - Volgende stap (autonoom): S-06 edit/place-remove tool + revisie, richting werkende vertical slice.
 - Commit + push naar origin main (grens A) volgt.
+
+## 2026-07-15 — S-06 edit-tool + S-07 persistence voltooid (strict TDD)
+- S-06 `voxel-edit` (Fase 3 opmaat, canoniek plan §3.2 edit-events): `Edit { world, old, new, actor, tick, revision }`, `EditLog` (append-only, monotoon), `EditTool::place/remove` die op `World` schrijven én loggen. 4 failing tests → groen (old-capture, monotone revisies, tool+log update, replay-reproductie op verse wereld). `old` is de werkelijke voorafgaande waarde → correcte undo/replay.
+- S-07 `voxel-persist` (Fase 3/5 opmaat, canoniek plan §3.6 + §4 Fase-3 gate "save/reload behoudt alle edits"): eigen binair formaat (magic `VWL1` + seed u32 + edit_count + per-edit velden), `save_world`/`load_world`/`PersistError`. Alleen seed+edits opgeslagen (basis reproduceerbaar → "procedurele basis + append-only editlog"). 3 failing tests → groen (round-trip reproductie incl. basis-terrain, log-behoud met revisies, corrupt/truncated → `Err` geen panic).
+- Verificatie: `cargo test --workspace` 40 tests groen (voxel-core 15, voxel-mesher 6, voxel-render 3, voxel-worldgen 5, voxel-world 4, voxel-edit 4, voxel-persist 3). `examples/demo_persist.rs` → `demo_persist.png` (384x384, 82955 px); visueel geverifieerd: toren staat er nog ná save→load (volledige persistence-keten).
+- Bug tijdens TDD: test leende geladen wereld immutabel maar riep `get_or_generate` (mut) — `mut` toegevoegd. `World::seed()` toegevoegd (nodig voor persist). Geen core-logica-fout.
+- Renderer-agnostisch (ADR-0002): voxel-edit + voxel-persist dependeren alleen op voxel-core/world/edit; géén godot/bevy/wgpu.
+- ADR-0004 (client-shell) loopt nog als subagent (deleg_4c7b3b6d); apart te verwerken.
+- Volgende stap (autonoom): S-08 spelercontroller + camera, S-09 headless dedicated server → runnable slice.
+- Commit + push naar origin main (grens A) volgt.

@@ -31,6 +31,11 @@ impl World {
         }
     }
 
+    /// The base-generation seed this world was created with.
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
     /// Get a chunk, generating and caching it from the seed if absent. Idempotent: an already
     /// cached chunk (including edits) is returned unchanged. Returns an owned copy so callers
     /// can hold several chunks without borrow conflicts.
