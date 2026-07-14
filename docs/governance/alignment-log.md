@@ -105,3 +105,15 @@ Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastg
 - Verplichte terugstap: plan-alignment OK (canoniek plan + ADR's 0001–0003 + S-03 plan intact). Budgetguard project-key spent $27,5299 (onder €30 → paid blijft dicht; ver onder $36 stop). Geen drift; geen betaalde calls (alles lokaal + gratis `:free`). Taakuitbesteding via subagent bespaart eigen `hy3:free` context/rate-limit.
 - Volgende stap (autonoom): S-03 uitbreiden (demo-scenario's/schaal) of S-04 client-shell/input (wgpu na Fase-2 benchmark).
 - Commit + push naar origin main (grens A) volgt.
+
+## 2026-07-15 — onafhankelijke review S-01-hardening verwerkt (subagent deleg_6881a331)
+- Subagent (leaf, :free model) reviewde commit 20baac0 met focus op correctheid, niet stijl.
+- **Conclusie reviewer: geen code-bugs.** Alle kernmechanismen correct bevonden:
+  - (1) nibble-orde consistent tussen `write_nibble`/`get`/`promote_to_dense` (even flat=low, oneven=high).
+  - (2) promotie PalettePacked→Dense bewaart ALLE voxelwaarden (decodering vóór overschrijven; untoucht = baseline).
+  - (3) v2 byte-stabiel formaat round-tript voor alle drie states (header 15 B, offsets consistent).
+  - (4) edge cases: chunk-boundary (flat 32767), materiaalindex 15 vs 16 (17e distincte triggert Dense, geen 5-bit overflow), high-nibble voxel, uniform zero-storage — allen correct.
+- **Twee test-gaps** gerapporteerd (geen bugs): (a) geen test voor high-nibble bij chunk-boundary (flat 32767); (b) geen geïsoleerde "promotie bewaart alle waarden" + multi-step post-promotion edit.
+- **Verholpen**: twee tests toegevoegd aan `spike_s01_hardening.rs` — `boundary_high_nibble_round_trips` en `promotion_preserves_all_values_then_continues_edits`. Eerste test-versie had zelf een foute aanname (telde baseline(0) niet mee als distinct → 17 ipv 16); gecorrigeerd naar baseline+15 = 16 distinct → PalettePacked, 17e = Dense. Review-gaps nu gedicht.
+- Verificatie: `cargo test --workspace` 27/27 groen (voxel-core 15, voxel-mesher 6, voxel-render 3).
+- Status: aligned. Geen drift; geen betaalde calls.

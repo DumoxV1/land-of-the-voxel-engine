@@ -155,3 +155,76 @@ fn uniform_serialization_round_trip() {
     assert_eq!(chunk, restored);
     assert_eq!(bytes, restored.to_bytes());
 }
+
+#[test]
+fn boundary_high_nibble_round_trips() {
+    // Highest flat index (N^3 - 1 = 32767) is odd -> lives in the HIGH nibble of the last
+    // packed byte. This is the riskiest bitpacking site (out-of-bounds / wrong nibble).
+    let n = CHUNK_SIZE as usize;
+    let last_flat = n * n * n - 1;
+    // flat = x*N*N + y*N + z; reconstruct a valid (x,y,z) for the last index.
+    let z = (last_flat % n) as u8;
+    let y = ((last_flat / n) % n) as u8;
+    let x = (last_flat / (n * n)) as u8;
+    let mut chunk = Chunk::uniform(ChunkCoord::new(0, 0, 0), mat(0));
+    chunk.set(voxel_core::coords::LocalVoxel::new(x, y, z), mat(1));
+    assert_eq!(chunk.state(), ChunkState::PalettePacked);
+    // Read back the boundary voxel on the high nibble of the final byte.
+    assert_eq!(
+        chunk.get(voxel_core::coords::LocalVoxel::new(x, y, z)),
+        mat(1),
+        "boundary voxel must decode from the high nibble of the last packed byte"
+    );
+    let packed = chunk.packed_data().expect("packed present");
+    let last_byte = packed[packed.len() - 1];
+    assert_eq!(
+        (last_byte & 0xF0) >> 4, 1,
+        "boundary flat (odd) maps to high nibble of last byte"
+    );
+    // Round-trip keeps it exact.
+    let restored = Chunk::from_bytes(&chunk.to_bytes()).expect("deserialize");
+    assert_eq!(restored.get(voxel_core::coords::LocalVoxel::new(x, y, z)), mat(1));
+}
+
+#[test]
+fn promotion_preserves_all_values_then_continues_edits() {
+    // Fill 15 distinct non-baseline materials (palette holds <=16 incl. baseline) -> PalettePacked.
+    // Then a 17th distinct material (16) triggers promotion to Dense. Continue editing AFTER
+    // promotion (multi-step post-promotion) and verify every value survives get() + round-trip.
+    let mut chunk = Chunk::uniform(ChunkCoord::new(0, 0, 0), mat(0));
+    // 15 non-baseline materials (1..15) at unique voxels along the x-axis (no collisions; x<32).
+    for i in 1..16u8 {
+        chunk.set(voxel_core::coords::LocalVoxel::new(i, 0, 0), mat(i));
+    }
+    assert_eq!(
+        chunk.state(),
+        ChunkState::PalettePacked,
+        "baseline(0)+15 materials = 16 distinct -> PalettePacked"
+    );
+
+    // 16th non-baseline material -> 17th distinct overall -> promotion to Dense.
+    chunk.set(voxel_core::coords::LocalVoxel::new(20, 0, 0), mat(16));
+    assert_eq!(chunk.state(), ChunkState::Dense, "17th distinct material promotes to Dense");
+
+    // Continue editing post-promotion.
+    chunk.set(voxel_core::coords::LocalVoxel::new(1, 1, 1), mat(17));
+    chunk.set(voxel_core::coords::LocalVoxel::new(2, 2, 2), mat(18));
+
+    // All set values must survive via get().
+    for i in 1..16u8 {
+        assert_eq!(
+            chunk.get(voxel_core::coords::LocalVoxel::new(i, 0, 0)),
+            mat(i),
+            "post-promotion value preserved for material {i}"
+        );
+    }
+    assert_eq!(chunk.get(voxel_core::coords::LocalVoxel::new(20, 0, 0)), mat(16));
+    assert_eq!(chunk.get(voxel_core::coords::LocalVoxel::new(1, 1, 1)), mat(17));
+    assert_eq!(chunk.get(voxel_core::coords::LocalVoxel::new(2, 2, 2)), mat(18));
+
+    // And survive a serialization round-trip.
+    let bytes = chunk.to_bytes();
+    let restored = Chunk::from_bytes(&bytes).expect("deserialize must succeed");
+    assert_eq!(chunk, restored, "dense chunk with multi-step edits round-trips exactly");
+    assert_eq!(bytes, restored.to_bytes(), "dense serialization stays byte-stable");
+}
