@@ -355,7 +355,7 @@ impl GpuScene {
                 buffer: &staging,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(bytes_per_row as u32),
+                    bytes_per_row: Some(bytes_per_row),
                     rows_per_image: Some(self.height),
                 },
             },

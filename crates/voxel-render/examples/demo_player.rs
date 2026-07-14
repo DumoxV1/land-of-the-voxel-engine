@@ -5,7 +5,7 @@
 //! Run with: cargo run --example demo_player -p voxel-render
 //! Produces: crates/voxel-render/demo_player.png
 
-use voxel_core::coords::{ChunkCoord, WorldVoxel};
+use voxel_core::coords::ChunkCoord;
 use voxel_player::{Input, Player, PlayerController};
 use voxel_render::{Camera, render_world, BACKGROUND};
 use voxel_world::World;

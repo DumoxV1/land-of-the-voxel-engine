@@ -9,7 +9,7 @@ use voxel_mesher::{greedy_mesh, culled_mesh, naive_mesh, Triangle, Vec3};
 /// Build a chunk from a closure: true => solid (material 1), false => empty (material 0).
 fn build_chunk(solid: impl Fn(i64, i64, i64) -> bool) -> voxel_core::chunk::Chunk {
     use voxel_core::coords::{ChunkCoord, CHUNK_SIZE};
-    let n = CHUNK_SIZE as i64;
+    let n = CHUNK_SIZE;
     let mut chunk = voxel_core::chunk::Chunk::uniform(ChunkCoord::new(0, 0, 0), MaterialId::from(0u8));
     for x in 0..n {
         for y in 0..n {
@@ -108,7 +108,7 @@ fn culling_reduces_faces_on_solid_block() {
 fn no_cracks_full_chunk_shell() {
     // A fully-solid chunk (border = air) exposes exactly its 6 outer faces. Greedy must
     // cover exactly 6*N^2 area with no cracks and no overlaps.
-    let n = voxel_core::coords::CHUNK_SIZE as i64;
+    let n = voxel_core::coords::CHUNK_SIZE;
     let chunk = build_chunk(|_, _, _| true);
     let greedy = greedy_mesh(&chunk);
     let expected_area = 6.0 * n as f64 * n as f64;
@@ -139,7 +139,7 @@ fn hollow_shell_has_twelve_exposed_faces() {
     // (toward outside air, each N^2) and 6 inner faces (toward the hollow interior, each
     // (N-2)^2 because edge voxels already face other shell voxels). Greedy merges each
     // face into one quad => 12 quads => 24 triangles.
-    let n = voxel_core::coords::CHUNK_SIZE as i64;
+    let n = voxel_core::coords::CHUNK_SIZE;
     let chunk = build_chunk(|x, y, z| {
         x == 0 || y == 0 || z == 0 || x == n - 1 || y == n - 1 || z == n - 1
     });

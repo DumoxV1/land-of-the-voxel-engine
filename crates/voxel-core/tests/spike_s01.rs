@@ -29,7 +29,7 @@ fn world_to_chunk_correct_for_negative_euclidean() {
         "local indices must stay in range for negatives");
     assert_eq!(chunk.world_voxel(local), w, "negative roundtrip must be exact");
     // Explicit Euclidean check: a voxel just below a chunk boundary.
-    let w2 = WorldVoxel::new(-CHUNK_SIZE as i64, 0, 0);
+    let w2 = WorldVoxel::new((-CHUNK_SIZE), 0, 0);
     let c2 = ChunkCoord::from_world(w2);
     assert_eq!(c2.x, -1, "world x = -CHUNK_SIZE belongs to chunk -1");
     let l2 = LocalVoxel::from_world(w2);

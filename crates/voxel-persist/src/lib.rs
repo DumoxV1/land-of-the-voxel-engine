@@ -61,7 +61,7 @@ pub fn load_world(path: &Path) -> Result<(World, EditLog), PersistError> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)?.read_to_end(&mut bytes)?;
 
-    if bytes.len() < 4 || &bytes[0..4] != MAGIC {
+    if bytes.len() < 4 || bytes[0..4] != MAGIC {
         return Err(PersistError::BadMagic);
     }
     let mut cursor = 4usize;

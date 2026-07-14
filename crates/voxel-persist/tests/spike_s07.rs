@@ -3,7 +3,7 @@
 
 use voxel_core::coords::WorldVoxel;
 use voxel_core::palette::MaterialId;
-use voxel_edit::{EditLog, EditTool};
+use voxel_edit::EditTool;
 use voxel_world::World;
 
 #[test]

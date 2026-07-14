@@ -3,3 +3,6 @@ Cargo.lock
 **/__pycache__/
 *.pyc
 .env
+
+# Runtime-rapporten (guards schrijven deze elke run)
+.hermes/reports/

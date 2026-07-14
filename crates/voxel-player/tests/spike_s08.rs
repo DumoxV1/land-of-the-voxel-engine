@@ -1,7 +1,6 @@
 //! S-08 player-controller tests (strict TDD — written before implementation, run RED first).
 //! References `voxel_player::{Player, PlayerController, Input}`, which may not yet exist.
 
-use voxel_core::coords::ChunkCoord;
 use voxel_core::palette::MaterialId;
 use voxel_player::{Input, Player, PlayerController};
 use voxel_world::World;
