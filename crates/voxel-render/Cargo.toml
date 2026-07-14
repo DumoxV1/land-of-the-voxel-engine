@@ -14,3 +14,4 @@ voxel-worldgen = { path = "../voxel-worldgen" }
 voxel-world = { path = "../voxel-world" }
 voxel-edit = { path = "../voxel-edit" }
 voxel-persist = { path = "../voxel-persist" }
+voxel-player = { path = "../voxel-player" }
