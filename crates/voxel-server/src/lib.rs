@@ -62,7 +62,10 @@ impl Server {
     pub fn tick(&mut self, dt: f32) {
         self.tick += 1;
         // We must avoid holding a borrow on self.players while also mutating self.world.
-        let ids: Vec<u32> = self.players.keys().copied().collect();
+        // Sort ids: HashMap iteration order is RandomState-dependent and would silently
+        // break determinism once players interact (S-11 audit fix).
+        let mut ids: Vec<u32> = self.players.keys().copied().collect();
+        ids.sort_unstable();
         for id in ids {
             if let Some(client) = self.players.get_mut(&id) {
                 let Client {

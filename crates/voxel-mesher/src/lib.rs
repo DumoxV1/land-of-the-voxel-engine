@@ -91,8 +91,19 @@ fn emit_quad(
     let p1 = corner(du, 0.0);
     let p2 = corner(du, dv);
     let p3 = corner(0.0, dv);
-    out.push((Triangle { a: p0, b: p1, c: p2, normal, material }, material));
-    out.push((Triangle { a: p0, b: p2, c: p3, normal, material }, material));
+    // Winding must be CCW seen from outside (geometric normal == face normal) so
+    // backface culling works (S-11 audit fix). The tangent basis is fixed per axis, so
+    // flip the vertex order when cross(u, v) points against the face normal.
+    let gx = (u.1 * v.2 - u.2 * v.1) as f32;
+    let gy = (u.2 * v.0 - u.0 * v.2) as f32;
+    let gz = (u.0 * v.1 - u.1 * v.0) as f32;
+    if gx * normal.x + gy * normal.y + gz * normal.z >= 0.0 {
+        out.push((Triangle { a: p0, b: p1, c: p2, normal, material }, material));
+        out.push((Triangle { a: p0, b: p2, c: p3, normal, material }, material));
+    } else {
+        out.push((Triangle { a: p0, b: p2, c: p1, normal, material }, material));
+        out.push((Triangle { a: p0, b: p3, c: p2, normal, material }, material));
+    }
 }
 
 /// Naïve mesher: one cube (6 faces) per solid voxel, regardless of neighbours.
@@ -154,10 +165,15 @@ pub fn greedy_mesh(chunk: &Chunk) -> Vec<Triangle> {
     out.into_iter().map(|(t, _)| t).collect()
 }
 
-/// Emit a single unit face (quad = 2 triangles) on the +normal side of voxel (x,y,z).
+/// Emit a single unit face (quad = 2 triangles) on the `normal` side of voxel (x,y,z).
+/// A voxel at (x,y,z) fills [x,x+1)x[y,y+1)x[z,z+1): positive faces lie on the +1 planes
+/// (S-11 audit fix — previously all faces collapsed onto the min-corner planes).
 fn emit_face(out: &mut Vec<(Triangle, MaterialId)>, x: i64, y: i64, z: i64, normal: Vec3, material: MaterialId) {
     let (u, v) = tangent_basis(normal);
-    emit_quad(out, x as f64, y as f64, z as f64, normal, u, v, 1.0, 1.0, material);
+    let bx = x as f64 + if normal.x > 0.0 { 1.0 } else { 0.0 };
+    let by = y as f64 + if normal.y > 0.0 { 1.0 } else { 0.0 };
+    let bz = z as f64 + if normal.z > 0.0 { 1.0 } else { 0.0 };
+    emit_quad(out, bx, by, bz, normal, u, v, 1.0, 1.0, material);
 }
 
 /// Choose in-plane tangent unit vectors for a given axis-aligned normal.
@@ -277,8 +293,11 @@ fn emit_merged_quad(
     normal: Vec3,
     material: MaterialId,
 ) {
+    // Positive faces lie on the far plane of the voxel layer (d+1); negative on d.
+    // (S-11 audit fix.)
+    let plane = if normal.x + normal.y + normal.z > 0.0 { d as f64 + 1.0 } else { d as f64 };
     let mut base = [0.0f64; 3];
-    base[axis] = d as f64;
+    base[axis] = plane;
     base[u_axis] = i as f64;
     base[v_axis] = j as f64;
 

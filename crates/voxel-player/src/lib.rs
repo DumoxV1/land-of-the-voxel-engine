@@ -18,6 +18,10 @@ const JUMP_SPEED: f32 = 8.0;
 const MOVE_SPEED: f32 = 5.0;
 /// Maximum physics sub-step (s) to avoid tunnelling through thin voxels at high speed.
 const MAX_SUB_DT: f32 = 0.02;
+/// Terminal fall speed (world units / s). Caps per-substep displacement below one voxel
+/// (40 * 0.02 = 0.8 < 1.0) so a falling player cannot tunnel through thin floors
+/// (S-11 audit fix).
+const TERMINAL_FALL_SPEED: f32 = 40.0;
 
 /// A player avatar: position, facing yaw, and ground state.
 #[derive(Debug, Clone)]
@@ -127,6 +131,9 @@ impl PlayerController {
             player.on_ground = false;
         }
         self.vel_y -= GRAVITY * dt;
+        if self.vel_y < -TERMINAL_FALL_SPEED {
+            self.vel_y = -TERMINAL_FALL_SPEED;
+        }
         let dy = self.vel_y * dt;
         let try_y = [player.pos[0], player.pos[1] + dy, player.pos[2]];
         if collides(world, &try_y) {
@@ -185,12 +192,22 @@ fn solid_at(world: &mut World, x: i64, y: i64, z: i64) -> bool {
 ///
 /// A solid voxel at world-Y `yv` fills `[yv, yv+1)`; the feet must sit on its top `yv+1`, so
 /// the player center is `(yv + 1) + HALF[1]`. `center_y` is the current (colliding) center.
+/// Samples every column overlapped by the AABB footprint (up to four), not just the center
+/// column (S-11 audit fix), and takes the highest solid top.
 fn resolve_floor_y(world: &mut World, x: f32, z: f32, center_y: f32) -> f32 {
     let foot = center_y - HALF[1];
     let start = foot.floor() as i64;
+    let x0 = (x - HALF[0]).floor() as i64;
+    let x1 = (x + HALF[0]).floor() as i64;
+    let z0 = (z - HALF[2]).floor() as i64;
+    let z1 = (z + HALF[2]).floor() as i64;
     for y in (start - 8..=start).rev() {
-        if solid_at(world, x.floor() as i64, y, z.floor() as i64) {
-            return (y as f32) + 1.0 + HALF[1];
+        for cx in x0..=x1 {
+            for cz in z0..=z1 {
+                if solid_at(world, cx, y, cz) {
+                    return (y as f32) + 1.0 + HALF[1];
+                }
+            }
         }
     }
     center_y

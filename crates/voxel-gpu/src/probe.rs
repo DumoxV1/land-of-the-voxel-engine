@@ -18,7 +18,7 @@ struct Vtx {
 pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         #[cfg(not(target_arch = "wasm32"))]
-        backends: wgpu::Backends::VULKAN,
+        backends: wgpu::Backends::PRIMARY,
         ..Default::default()
     });
 

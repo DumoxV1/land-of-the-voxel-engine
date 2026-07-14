@@ -50,8 +50,14 @@ pub fn save_world(world: &World, log: &EditLog, path: &Path) -> Result<(), Persi
         buf.extend_from_slice(&e.tick.to_le_bytes());
         buf.extend_from_slice(&e.revision.to_le_bytes());
     }
-    let mut f = std::fs::File::create(path)?;
+    // Atomic write (S-11 audit fix): write to a temp file, sync, then rename over the
+    // target so a crash mid-write can never corrupt an existing save.
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::File::create(&tmp)?;
     f.write_all(&buf)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 

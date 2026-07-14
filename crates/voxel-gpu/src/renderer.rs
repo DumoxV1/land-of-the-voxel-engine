@@ -27,6 +27,7 @@ pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub fog_color: [f32; 4],
     pub params: [f32; 4], // x = fog_density
+    pub eye_pos: [f32; 4], // xyz = camera eye (fog distance reference), w unused
 }
 
 /// Minimal perspective camera (matches voxel-render conventions for reuse of the math).
@@ -67,13 +68,13 @@ impl GpuCamera {
     }
 }
 
-/// Warm material tints (Lay of the Land vibe): grass, dirt, stone, metal, wood, leaf, ...
-/// Indexed by material id 0..=15. Air (0) is unused.
+/// Warm material tints (Lay of the Land vibe), matching voxel-worldgen's material ids:
+/// 0 = air, 1 = dirt, 2 = grass, 3 = stone (S-11 audit fix: grass/dirt were swapped).
 pub fn material_tint(mat: MaterialId) -> [f32; 3] {
     match mat.0 {
         0 => [0.0, 0.0, 0.0],        // air
-        1 => [0.42, 0.62, 0.28],     // grass (warm green)
-        2 => [0.52, 0.36, 0.22],     // dirt (warm brown)
+        1 => [0.52, 0.36, 0.22],     // dirt (warm brown)
+        2 => [0.42, 0.62, 0.28],     // grass (warm green)
         3 => [0.50, 0.50, 0.52],     // stone (cool grey)
         4 => [0.78, 0.80, 0.85],     // metal (light steel)
         5 => [0.45, 0.30, 0.18],     // wood (dark warm)
@@ -100,7 +101,7 @@ impl GpuScene {
     pub async fn new(width: u32, height: u32) -> anyhow::Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             #[cfg(not(target_arch = "wasm32"))]
-            backends: wgpu::Backends::VULKAN,
+            backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
         let adapter = instance
@@ -182,7 +183,8 @@ impl GpuScene {
                 targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
             }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: None,
+                // Mesher guarantees CCW winding seen from outside (S-11), so cull backfaces.
+                cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -264,6 +266,7 @@ impl GpuScene {
             view_proj: camera.view_proj(),
             fog_color: [0.62, 0.66, 0.74, 1.0],
             params: [0.012, 0.0, 0.0, 0.0],
+            eye_pos: [camera.eye[0], camera.eye[1], camera.eye[2], 0.0],
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&[cu]));
@@ -394,6 +397,7 @@ struct CameraUniform {
     view_proj: mat4x4<f32>,
     fog_color: vec4<f32>,
     params: vec4<f32>,
+    eye_pos: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cam: CameraUniform;
 
@@ -430,16 +434,17 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     var col = base * (ambient + 0.75 * diff);
     // Warm tint at top, cool in shadows.
     col = mix(col, col * vec3<f32>(1.05, 0.98, 0.90), 0.3);
-    // Distance fog for depth/atmosphere.
-    let dist = length(in.world_pos - vec3<f32>(0.0, 0.0, 0.0));
+    // Distance fog for depth/atmosphere, measured from the camera eye (S-11 audit fix:
+    // was measured from the world origin, which breaks as soon as the camera moves).
+    let dist = length(in.world_pos - cam.eye_pos.xyz);
     let fog = 1.0 - exp(-cam.params.x * dist);
     col = mix(col, cam.fog_color.xyz, clamp(fog, 0.0, 0.85));
     return vec4<f32>(col, 1.0);
 }
 
 fn mat_tint(id: u32) -> vec3<f32> {
-    if (id == 1u) { return vec3<f32>(0.42, 0.62, 0.28); }
-    if (id == 2u) { return vec3<f32>(0.52, 0.36, 0.22); }
+    if (id == 1u) { return vec3<f32>(0.52, 0.36, 0.22); } // dirt
+    if (id == 2u) { return vec3<f32>(0.42, 0.62, 0.28); } // grass
     if (id == 3u) { return vec3<f32>(0.50, 0.50, 0.52); }
     if (id == 4u) { return vec3<f32>(0.78, 0.80, 0.85); }
     if (id == 5u) { return vec3<f32>(0.45, 0.30, 0.18); }

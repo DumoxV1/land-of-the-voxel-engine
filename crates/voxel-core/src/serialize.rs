@@ -1,28 +1,29 @@
 //! Byte-stable serialization for chunks (canonical round-trip).
 //!
 //! Format (all little-endian, fixed layout for determinism):
-//!   [0]     version (u8) = 2
-//!   [1..4]  chunk x (i32 LE)
-//!   [4..7]  chunk y (i32 LE)
-//!   [7..10] chunk z (i32 LE)
-//!   [10]    state (u8): 0 = Uniform, 1 = PalettePacked, 2 = Dense
-//!   [11]    uniform material (u8)
+//!   [0]      version (u8) = 3
+//!   [1..9]   chunk x (i64 LE)
+//!   [9..17]  chunk y (i64 LE)
+//!   [17..25] chunk z (i64 LE)
+//!   [25]     state (u8): 0 = Uniform, 1 = PalettePacked, 2 = Dense
+//!   [26]     uniform material (u8)
 //!   PalettePacked only:
-//!     [12]   palette_len (u8, 1..=16)
-//!     [13..13+palette_len]  palette material bytes (one per entry, in index order)
+//!     [27]   palette_len (u8, 1..=16)
+//!     [28..28+palette_len]  palette material bytes (one per entry, in index order)
 //!     [..]   packed 4-bit voxel data (N^3/2 bytes, even voxel = low nibble)
 //!   Dense only:
 //!     [..]   dense CHUNK_SIZE^3 material bytes (one per voxel, flat)
 //!
-//! Versioning starts at day one (ADR-0003). Version 1 (only Uniform/NonUniform) is no
-//! longer produced; we keep the version byte bumped so old payloads are rejected cleanly.
+//! Versioning starts at day one (ADR-0003). Version 2 used i32 coords which silently
+//! truncated far chunks (S-11 audit fix); version 3 stores full i64 and validates that
+//! every packed nibble indexes inside the palette.
 
 use crate::chunk::{Chunk, ChunkState};
 use crate::coords::{ChunkCoord, CHUNK_SIZE};
 use crate::palette::MaterialId;
 
-const VERSION: u8 = 2;
-const HEADER_LEN: usize = 15; // version(1) + 3*i32(12) + state(1) + uniform(1)
+const VERSION: u8 = 3;
+const HEADER_LEN: usize = 27; // version(1) + 3*i64(24) + state(1) + uniform(1)
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkPayload {
@@ -50,9 +51,9 @@ impl ChunkPayload {
         let n = (CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE) as usize;
         let mut out = Vec::new();
         out.push(VERSION);
-        out.extend_from_slice(&(self.coord.x as i32).to_le_bytes());
-        out.extend_from_slice(&(self.coord.y as i32).to_le_bytes());
-        out.extend_from_slice(&(self.coord.z as i32).to_le_bytes());
+        out.extend_from_slice(&self.coord.x.to_le_bytes());
+        out.extend_from_slice(&self.coord.y.to_le_bytes());
+        out.extend_from_slice(&self.coord.z.to_le_bytes());
         let state_byte = match self.state {
             ChunkState::Uniform => 0u8,
             ChunkState::PalettePacked => 1u8,
@@ -100,17 +101,17 @@ impl ChunkPayload {
                 "unsupported chunk payload version {version} (expected {VERSION})"
             ));
         }
-        let cx = i32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as i64;
-        let cy = i32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]) as i64;
-        let cz = i32::from_le_bytes([bytes[9], bytes[10], bytes[11], bytes[12]]) as i64;
-        let state = match bytes[13] {
+        let cx = i64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        let cy = i64::from_le_bytes(bytes[9..17].try_into().unwrap());
+        let cz = i64::from_le_bytes(bytes[17..25].try_into().unwrap());
+        let state = match bytes[25] {
             0 => ChunkState::Uniform,
             1 => ChunkState::PalettePacked,
             2 => ChunkState::Dense,
             s => return Err(format!("invalid chunk state {s}")),
         };
-        let uniform = MaterialId::from(bytes[14]);
-        let body = &bytes[15..];
+        let uniform = MaterialId::from(bytes[26]);
+        let body = &bytes[27..];
 
         let (palette, packed, dense) = match state {
             ChunkState::Uniform => (None, None, None),
@@ -132,6 +133,18 @@ impl ChunkPayload {
                 }
                 let palette = body[1..1 + plen].iter().map(|&b| MaterialId::from(b)).collect();
                 let packed = body[1 + plen..].to_vec();
+                // Every 4-bit index must point inside the palette (S-11 audit fix):
+                // an out-of-range nibble would otherwise panic later in `Chunk::get`.
+                let total = (CHUNK_SIZE as usize).pow(3);
+                for (bi, &byte) in packed.iter().enumerate() {
+                    let lo = (byte & 0x0F) as usize;
+                    let hi = (byte >> 4) as usize;
+                    if lo >= plen || (2 * bi + 1 < total && hi >= plen) {
+                        return Err(format!(
+                            "packed nibble out of palette range at byte {bi} (palette_len {plen})"
+                        ));
+                    }
+                }
                 (Some(palette), Some(packed), None)
             }
             ChunkState::Dense => {
