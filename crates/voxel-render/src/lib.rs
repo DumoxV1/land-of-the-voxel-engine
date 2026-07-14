@@ -10,4 +10,4 @@ pub mod camera;
 pub mod render;
 
 pub use camera::Camera;
-pub use render::{render_scene, BACKGROUND};
+pub use render::{render_scene, render_world, BACKGROUND};
