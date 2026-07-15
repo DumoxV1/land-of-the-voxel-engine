@@ -115,7 +115,6 @@ pub fn mesh_chunk_world_meters(
     if let crate::chunk_stream::Lod::Imposter = lod {
         return mesh_chunk_imposter(chunk);
     }
-    let mut tris: Vec<Triangle> = Vec::new();
     // LOD: downsample to 2x blocks first, then mesh the coarse chunk at 2x world scale.
     let (mesh_chunk, voxel_scale) = match lod {
         crate::chunk_stream::Lod::Full => (chunk.clone(), VOXEL_SIZE_M),

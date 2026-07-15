@@ -32,13 +32,13 @@ const _BEDROCK_DEPTH_DEPRECATED: i64 = 1;
 
 /// Hard upper bound on `surface_height_m` in **meters**, used by the O(1) air-chunk early-out
 /// in `generate_chunk`. `surface_height_m = base + mid + micro` where each term is a
-/// `(fbm*0.5+0.5)` value in [0,1) times its amplitude: base ≤ 60 m, mid ≤ 40·max_roughness
-/// (roughness ≤ 1.4 → 56 m), micro ≤ 3 m → ≤ 119 m. A +4 m margin keeps the bound safe if the
+/// `(fbm*0.5+0.5)` value in [0,1) times its amplitude: base ≤ 70 m, mid ≤ 90·max_roughness
+/// (roughness ≤ 1.4 → 126 m), micro ≤ 3 m → ≤ 199 m. A +4 m margin keeps the bound safe if the
 /// amplitude constants shift. Stap 4 (Terrain 2.0) adds an overhang bulge of up to
 /// `OVERHANG_AMP_CEIL` voxels ABOVE the surface, so the true tallest solid voxel is
 /// `MAX_SURFACE_VOX + OVERHANG_AMP_CEIL`. MUST stay ≥ the true supremum (surface + overhang)
 /// or the early-out would clip overhang voxels.
-const MAX_SURFACE_M: f32 = 60.0 + 40.0 * 1.4 + 3.0 + 4.0; // 123 m (heightfield only)
+const MAX_SURFACE_M: f32 = 70.0 + 90.0 * 1.4 + 3.0 + 4.0; // 199 m (heightfield only)
 /// True ceiling (meters) of any solid voxel = heightfield supremum + overhang bulge.
 const MAX_SOLID_M: f32 =
     MAX_SURFACE_M + (OVERHANG_AMP_CEIL as f32) * voxel_core::coords::VOXEL_SIZE_M;
@@ -587,11 +587,12 @@ pub fn biome_query(x: i64, z: i64, seed: u32) -> BiomeQuery {
 /// single height query costs ~7 fBm evaluations instead of 3× redundant region samples.
 pub fn surface_height_m(x: i64, z: i64, seed: u32) -> f32 {
     let region = climate_region(x, z, seed);
-    // T1: continental envelope (~60 m).
-    let base = (fbm(x, z, seed ^ 0xBA5E, &REGION_OCTAVES) * 0.5 + 0.5) * 60.0;
-    // T2: biome-conditioned roughness (region shared with biome_from).
+    // T1: continental envelope (~70 m).
+    let base = (fbm(x, z, seed ^ 0xBA5E, &REGION_OCTAVES) * 0.5 + 0.5) * 70.0;
+    // T2: biome-conditioned roughness (region shared with biome_from). Taak 5: amplitude
+    // 40 -> 90 voor hogere, filmischere heuvels (max ~126 m bij roughness 1.4).
     let biome = biome_from(region, x, z, seed);
-    let mid = (fbm(x, z, seed ^ 0x71D0, &BIOME_OCTAVES) * 0.5 + 0.5) * 40.0 * biome_roughness(biome);
+    let mid = (fbm(x, z, seed ^ 0x71D0, &BIOME_OCTAVES) * 0.5 + 0.5) * 90.0 * biome_roughness(biome);
     // T3: micro height — only >=128-vox octaves (walkable).
     let micro = (fbm(x, z, seed ^ 0x91C3, &LOCAL_H_OCTAVES) * 0.5 + 0.5) * 3.0;
     base + mid + micro
@@ -1071,6 +1072,28 @@ mod tests {
         assert!(lo <= hi, "different-seed range must still be valid");
     }
 
+    /// Taak 5 (2026-07-15): heuvels moeten hoger zijn dan de oude 56 m amplitude. De
+    /// surface-span over een breed gebied moet nu duidelijk groter zijn (hogere, filmischere
+    /// relief). Eist > 40 m span (oude mid-amplitude was 40 m * roughness, nu 90 m).
+    #[test]
+    fn terrain_has_taller_relief() {
+        let seed = 7u32;
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for cx in 0..40i64 {
+            for cz in 0..40i64 {
+                let h = surface_height_m(cx * 32 + 16, cz * 32 + 16, seed);
+                lo = lo.min(h);
+                hi = hi.max(h);
+            }
+        }
+        let span = hi - lo;
+        assert!(
+            span > 40.0,
+            "surface relief span {span:.1} m too flat for Taak 5 (want > 40 m, ideally ~80 m+)"
+        );
+    }
+
     /// Helper: does a chunk contain any non-air voxel?
     fn chunk_has_any_solid(chunk: &voxel_core::chunk::Chunk) -> bool {
         for ly in 0..voxel_core::coords::CHUNK_SIZE as u8 {
@@ -1085,5 +1108,6 @@ mod tests {
         false
     }
 }
+
 
 

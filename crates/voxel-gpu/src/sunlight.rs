@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use voxel_core::chunk::Chunk;
-use voxel_core::coords::{ChunkCoord, LocalVoxel, CHUNK_SIZE, VOXEL_SIZE_M};
+use voxel_core::coords::{ChunkCoord, LocalVoxel, CHUNK_SIZE};
 use voxel_mesher::{Triangle, Vec3};
 
 /// Maximum sunlight level (Minecraft convention). 15 = direct sky, 0 = full shadow.

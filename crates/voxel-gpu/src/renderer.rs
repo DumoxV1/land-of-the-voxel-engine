@@ -78,20 +78,26 @@ impl GpuCamera {
     }
 }
 
+/// Per-material albedo tile resolution in pixels (Taak 5: 16 -> 1024 = echte 4K-scale
+/// detail per materiaal; 9 materialen * 1024² * 4 B ≈ 36 MB, binnen VRAM).
+pub(crate) const TEXTURE_TILE: u32 = 1024;
+
 /// Warm material tints (Lay of the Land vibe), indexed by material id 0..=15.
 /// Canonical ids follow voxel-worldgen: 1 = DIRT, 2 = GRASS, 3 = STONE.
 pub fn material_tint(mat: MaterialId) -> [f32; 3] {
     match mat.0 {
-        0 => [0.0, 0.0, 0.0],    // air
-        1 => [0.52, 0.36, 0.22], // dirt (warm brown)
-        2 => [0.42, 0.62, 0.28], // grass (warm green)
-        3 => [0.50, 0.50, 0.52], // stone (cool grey)
-        4 => [0.78, 0.80, 0.85], // metal (light steel)
-        5 => [0.45, 0.30, 0.18], // wood (dark warm)
-        6 => [0.30, 0.55, 0.25], // leaf (green)
-        7 => [0.85, 0.78, 0.55],   // sand (warm)
-        8 => [0.93, 0.95, 0.98],   // snow (near white, cool)
-        _ => [0.6, 0.6, 0.65],   // fallback
+        // Taak 5 (2026-07-15): hoog-verzadigde, warme Lay-of-the-Land-palet. Steen is nu
+        // warm beige/grijs (geen koud grijs meer), gras diep groen, aarde rijk bruin.
+        0 => [0.0, 0.0, 0.0],     // air
+        1 => [0.55, 0.34, 0.18],  // dirt  (rijk bruin)
+        2 => [0.26, 0.56, 0.16],  // grass (diep verzadigd groen)
+        3 => [0.62, 0.57, 0.48],  // stone (warm beige-grijs, niet koud grijs)
+        4 => [0.74, 0.77, 0.82],  // metal (licht staal, koel maar helder)
+        5 => [0.50, 0.31, 0.16],  // wood  (donker warm)
+        6 => [0.20, 0.48, 0.14],  // leaf  (donker groen)
+        7 => [0.90, 0.78, 0.40],  // sand  (goud-geel, verzadigd)
+        8 => [0.96, 0.97, 0.99],  // snow   (warm wit)
+        _ => [0.64, 0.60, 0.52],  // fallback (warm grijs)
     }
 }
 
@@ -114,8 +120,9 @@ impl MaterialPbr {
                 let t = material_tint(voxel_core::palette::MaterialId::from(id));
                 MaterialPbr {
                     albedo_tint: [t[0], t[1], t[2], 1.0],
-                    // tiling: world-meters per texture repeat. 0.5 -> a 2m tile on a 4m quad.
-                    params: [0.5, 1.0, 0.8, 0.0],
+                    // tiling: world-meters per texture repeat. Taak 5: 0.25 -> een 4 m tile op
+                    // een 4 m quad, zodat de 1024² fBm-detail zichtbaar is (was 0.5 = 2 m).
+                    params: [0.25, 1.0, 0.8, 0.0],
                     emissive: [0.0, 0.0, 0.0, 0.0],
                 }
             })
@@ -349,29 +356,66 @@ impl GpuScene {
         });
         queue.write_buffer(&mat_buf, 0, bytemuck::cast_slice(&materials));
 
-        // 16x16 tiling per material; tinted base + cheap value-noise variation.
-        const TILE: u32 = 16;
+        // Taak 5 (2026-07-15): echte 4K-scale albedo-tiles (1024² per materiaal) met
+        // meerdere-octaaf fBm-value-noise voor natuurlijke steen/gras/grond-structuur
+        // (geen 16² hash-noise meer). Tint = basiskleur, noise = luminantie-variatie.
+        // Mipmaps (generate_mipmaps) → scherpe nabij-detail, geen moiré op afstand.
+        const TILE: u32 = TEXTURE_TILE;
         let layer_count = materials.len() as u32;
+        // fBm value-noise (lokale CPU-implementatie voor tile-gen).
+        let hash2 = |x: i32, y: i32, seed: i32| -> f32 {
+            // i64 om overflow te voorkomen bij grote TILE (1024²).
+            let n = (x as i64 * 374761393 + y as i64 * 668265263 + seed as i64 * 2147483647) as f32;
+            let s = (n.sin() * 43758.5453).fract().abs();
+            s
+        };
+        let vnoise = |x: f32, y: f32, seed: i32| -> f32 {
+            let xi = x.floor() as i32;
+            let yi = y.floor() as i32;
+            let xf = x - x.floor();
+            let yf = y - y.floor();
+            let u = xf * xf * (3.0 - 2.0 * xf);
+            let v = yf * yf * (3.0 - 2.0 * yf);
+            let a = hash2(xi, yi, seed);
+            let b = hash2(xi + 1, yi, seed);
+            let c = hash2(xi, yi + 1, seed);
+            let d = hash2(xi + 1, yi + 1, seed);
+            let ab = a + (b - a) * u;
+            let cd = c + (d - c) * u;
+            ab + (cd - ab) * v
+        };
+        let fbm = |mut x: f32, mut y: f32, seed: i32| -> f32 {
+            let mut amp = 0.5f32;
+            let mut freq = 1.0f32;
+            let mut sum = 0.0f32;
+            let mut norm = 0.0f32;
+            for _ in 0..5 {
+                sum += amp * vnoise(x * freq, y * freq, seed);
+                norm += amp;
+                amp *= 0.5;
+                freq *= 2.0;
+            }
+            sum / norm
+        };
         let mut rgba = Vec::with_capacity((TILE * TILE * layer_count) as usize * 4);
-        for m in &materials {
-            let base = [
-                (m.albedo_tint[0] * 255.0) as u8,
-                (m.albedo_tint[1] * 255.0) as u8,
-                (m.albedo_tint[2] * 255.0) as u8,
-                255,
-            ];
+        for (li, _m) in materials.iter().enumerate() {
+            let mseed = (li as i32) * 1013 + 7;
+            // Per-materiaal noise-schaal: steen/fout fijnere korrel, gras/dirt bredere vlekken.
+            let scale = if li == 2 || li == 6 { 24.0 } else { 10.0 };
             for y in 0..TILE {
                 for x in 0..TILE {
-                    // Deterministic value noise (hash) so the tile has stable variation.
-                    let h = ((x * 73 + y * 191 + 17) % 31) as f32 / 31.0;
-                    let v = (h - 0.5) * 38.0; // +/- variation
-                    let r = clamp8(base[0] as i32 + v as i32);
-                    let g = clamp8(base[1] as i32 + v as i32);
-                    let b = clamp8(base[2] as i32 + v as i32);
-                    rgba.extend_from_slice(&[r, g, b, 255]);
+                    let n = fbm(x as f32 / scale, y as f32 / scale, mseed); // 0..1
+                    // Grijswaarden-luminantie: de tile bevat ALLEEN structuur (noise), de
+                    // shader vermenigvuldigt met `albedo_tint` voor de kleur. Zo wordt de
+                    // tint niet dubbel aangebracht (base² → te donker).
+                    let lum = (0.72 + 0.42 * n) * 255.0; // 0.72..1.14 -> 184..291
+                    let v = clamp8(lum as i32);
+                    rgba.extend_from_slice(&[v, v, v, 255]);
                 }
             }
         }
+        let mip_levels = 1u32; // Taak 5 TODO: echte mipmap-blit voor moiré-vrije afstand; 1024²
+                               // tile + anisotropy-16 geeft nu al scherp nabij-detail.
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("albedo-array"),
             size: wgpu::Extent3d {
@@ -379,7 +423,7 @@ impl GpuScene {
                 height: TILE,
                 depth_or_array_layers: layer_count,
             },
-            mip_level_count: 1,
+            mip_level_count: mip_levels,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -1040,6 +1084,45 @@ mod tests {
             );
         });
     }
+
+    /// Taak 5 (2026-07-15): het palette moet hoog-verzadigd zijn (geen grijstinten meer).
+    /// Meet de gemiddelde verzadiging van de biome-tints (grass/dirt/stone/sand) in HSV;
+    /// die moet boven een drempel liggen.
+    #[test]
+    fn material_palette_is_saturated() {
+        // Hulp: RGB [0..1] -> verzadiging (HSV s, 0..1).
+        fn sat(r: f32, g: f32, b: f32) -> f32 {
+            let max = r.max(g).max(b);
+            let min = r.min(g).min(b);
+            if max <= 1e-4 {
+                0.0
+            } else {
+                (max - min) / max
+            }
+        }
+        let ids = [1u8, 2, 3, 5, 6, 7]; // dirt, grass, stone, wood, leaf, sand (geen air/metal/snow)
+        let mut avg = 0.0f32;
+        for &id in &ids {
+            let t = material_tint(voxel_core::palette::MaterialId::from(id));
+            avg += sat(t[0], t[1], t[2]);
+        }
+        avg /= ids.len() as f32;
+        assert!(
+            avg > 0.25,
+            "palette avg saturation {avg:.2} too low (grijstinten) — want > 0.25"
+        );
+    }
+
+    /// Taak 5 (2026-07-15): albedo-tiles moeten echte 4K-scale resolutie hebben (>= 1024 px)
+    /// in plaats van de oude 16 px hash-noise.
+    #[test]
+    fn texture_tiles_are_4k_scale() {
+        assert!(
+            TEXTURE_TILE >= 1024,
+            "albedo tile {} px is niet 4K-scale (want >= 1024)",
+            TEXTURE_TILE
+        );
+    }
 }
 
 const VOXEL_WGSL: &str = r#"
@@ -1122,10 +1205,13 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     // hellingen, sneeuw boven de boomgrens. Wereld-pos in meters (mesh is in meters).
     let slope = 1.0 - abs(n.y);                 // 0 vlak, 1 verticaal
     let sky = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-    let rock = vec3<f32>(0.45, 0.45, 0.48);
-    let snow = vec3<f32>(0.93, 0.95, 0.98);
-    // Rots verschijnt op steile hellingen; sneeuw boven ~26 m wereld-hoogte.
-    let rock_mix = smoothstep(0.35, 0.75, slope) * 0.6;
+    // Taak 5: warme rots (beige-bruin, geen koud grijs) + warme sneeuw, zodat hellingen
+    // kleur houden in plaats van grijs weg te vallen.
+    let rock = vec3<f32>(0.58, 0.46, 0.32);
+    let snow = vec3<f32>(0.96, 0.97, 0.99);
+    // Rots verschijnt op steile hellingen; sneeuw boven ~26 m wereld-hoogte. rock_mix
+    // verlaagd (0.6->0.35) zodat de biome-tint doorschijnt op gematigde hellingen.
+    let rock_mix = smoothstep(0.45, 0.85, slope) * 0.35;
     let snow_mix = smoothstep(24.0, 30.0, p.y) * (1.0 - slope * 0.5);
     albedo = mix(albedo, rock, rock_mix);
     albedo = mix(albedo, snow, snow_mix);

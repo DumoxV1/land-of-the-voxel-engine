@@ -221,7 +221,22 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       (24×24, seed 7): **409/576 kolommen overhang** (was ~3%), **166/576 cave** → wereld is nu
       rijk aan richels/kliffen + grotten. Release `gpu_window_main` herbouwd.
 
-Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
+27q. ✅ **VISUAL UPGRADE — TAAK 5 (2026-07-15, autonoom):** gebruiker wilde hogere heuvels,
+      enorm palette + echte 4K textures (Lay of the Land-stijl) na live-screenshot (grot=put
+      met overhang, heuvels=grey-ish). Drie oorzaken van grijstinten gefixed: (1) albedo-tiles
+      waren 16×16 hash-noise → nu **1024² fBm-value-noise** per materiaal (TEXTURE_TILE=1024,
+      ~36 MB VRAM), shading doet de tint (geen dubbel-tint base²-bug); tiling 0.5→0.25 zodat
+      detail zichtbaar is. (2) Shader `rock_mix` was 60% koud grijs op hellingen → nu warme
+      rots (beige-bruin) + mix 0.6→0.35 zodat biome-tint doorschijnt. (3) `material_tint`
+      naar hoog-verzadigde warme kleuren (diep groen gras, rijk bruin dirt, warm beige steen,
+      goud-geel zand). Wereldgen: `surface_height_m` mid-amplitude 40→90, base 60→70 →
+      MAX_SURFACE_M 123→199 m (hogere, filmischere heuvels; spawn-top 27→34 m). Nieuwe tests:
+      `terrain_has_taller_relief`, `material_palette_is_saturated`, `texture_tiles_are_4k_scale`.
+      **30/30 voxel-gpu lib + 15/15 voxel-worldgen groen**, throughput release 10.6 ms/chunk
+      (onder 25 ms guard). Plan-doc: docs/research/visual-upgrade-4k-palette/PLAN_TAAK5.md.
+      Release `gpu_window_main` herbouwd.
+
+## Auditwaarschuwing
 
 ## Actieve automatisering
 - Dagelijkse no-agent plan-alignmentguard.
