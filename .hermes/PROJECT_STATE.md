@@ -173,6 +173,26 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       - renderer.rs (shader-spike) NIET aangeraakt/gecommit door deze sessie. Opmerking:
         de spike blijkt inmiddels als commit 7b23b89 vastgelegd (buiten deze sessie om).
 
+27n. ✅ FASE A vervolg #2 (2026-07-15, 2e autonome CRON-herstart na opnieuw stilgevallen
+      hoofd-sessie): worldgen **per-kolom height-buffer cache**, strict TDD, workspace
+      **91/91 groen** (was 89, +2 nieuw). GEEN destructieve git; renderer.rs shader-spike
+      + WIP (walk/fly/step-up in voxel-player + gpu_window) ONaangeraakt gelaten.
+      - **Bevinding:** `surface_height_m` is een zuivere functie van wereld-X/Z (onafhankelijk
+        van chunk.y). `generate_chunk` bouwde tóch de volledige (n+2)²≈1156-cel height-buffer
+        opnieuw voor ELKE Y-slab, terwijl de client per kolom `cy in 0..=max_cy` (~7-8 slabs)
+        streamt → tot ~7× redundante fBm-herberekening per kolom. De ~6 diepe all-air chunks
+        per kolom betaalden de volle buffer-kost alleen om via de A2-envelope weg te vallen.
+      - **Fix:** thread-local LRU (`COLUMN_HBUF_CACHE`, cap 64) keyed op (cx,cz,seed); buffer
+        één keer bouwen, delen over alle Y-slabs via `Rc<Vec<f32>>`. Per-thread → rayon mesh-pool
+        heeft geen lock nodig; determinisme behouden (buffer = zuivere resultaten). Byte-identieke
+        output (envelope + fill ongewijzigd).
+      - **Tests (Rood→Groen):** `column_reuse_is_faster_than_distinct_columns` (zelfde kolom
+        markant sneller dan N distincte kolommen) + `column_cache_preserves_determinism_and_seed_isolation`
+        (determinisme na cache-churn; geen seed-collisie). Bestaande spike_s04 (deterministisch/
+        boundary-continu/material-layers) blijven groen = correctheidsgarantie.
+      - renderer.rs (shader-spike) NIET aangeraakt; alleen `crates/voxel-worldgen/src/lib.rs`
+        gewijzigd + gecommit (geïsoleerd, zoals 27m's veilige patroon).
+
 ## Auditwaarschuwing
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
 

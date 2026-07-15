@@ -4,6 +4,9 @@
 //! function of world X/Z, so adjacent chunks join seamlessly (no cracks at borders).
 //! Renderer-agnostic: depends only on `voxel-core`.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use voxel_core::chunk::Chunk;
 use voxel_core::coords::{ChunkCoord, LocalVoxel};
 use voxel_core::palette::MaterialId;
@@ -32,6 +35,67 @@ const BEDROCK_DEPTH: i64 = 8;
 /// amplitude constants shift. MUST stay ≥ the true supremum or the early-out would clip terrain.
 const MAX_SURFACE_M: f32 = 60.0 + 40.0 * 1.4 + 3.0 + 4.0; // 123 m
 
+/// Max distinct column height-buffers kept per thread (LRU). One streamed frame touches a
+/// few hundred columns; 64 comfortably covers the burst of Y-slabs generated for a single
+/// column while bounding memory (~64 · (34·34·4 B) ≈ 0.3 MB/thread) over a long session.
+const COLUMN_CACHE_CAP: usize = 64;
+
+thread_local! {
+    /// Per-thread LRU cache of column surface-height buffers, keyed by (cx, cz, seed).
+    /// `surface_height_m` is a pure function of world X/Z (independent of chunk.y), so every
+    /// Y-slab in a column shares ONE buffer. The live client streams `cy in 0..=max_cy`
+    /// (~7-8 slabs/column), so without this cache the (n+2)² buffer — each cell a ~7-fBm
+    /// `surface_height_m` call — was rebuilt per slab (~7x redundant). Per-thread → the rayon
+    /// mesh pool needs no locking, and determinism holds (buffers store pure results).
+    static COLUMN_HBUF_CACHE: RefCell<Vec<((i64, i64, u32), Rc<Vec<f32>>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Return the (n+2)² surface-height buffer (in meters) for column (cx, cz) under `seed`,
+/// building it once and caching it per thread (LRU). Byte-identical to the old inline loop.
+fn column_height_buffer(cx: i64, cz: i64, origin_x: i64, origin_z: i64, seed: u32) -> Rc<Vec<f32>> {
+    let key = (cx, cz, seed);
+    // Fast path: cache hit → move-to-front (back = most-recently-used) and return the shared buffer.
+    if let Some(hit) = COLUMN_HBUF_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.iter().position(|(k, _)| *k == key).map(|pos| {
+            let entry = c.remove(pos);
+            let buf = entry.1.clone();
+            c.push(entry);
+            buf
+        })
+    }) {
+        return hit;
+    }
+    // Miss: build the buffer, then insert (evicting the least-recently-used front at capacity).
+    let buf = Rc::new(build_column_height_buffer(origin_x, origin_z, seed));
+    COLUMN_HBUF_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= COLUMN_CACHE_CAP {
+            c.remove(0);
+        }
+        c.push((key, buf.clone()));
+    });
+    buf
+}
+
+/// Build the raw (n+2)² surface-height buffer (meters) for a column — the previously-inline
+/// loop, factored out so `column_height_buffer` can cache its result across Y-slabs.
+fn build_column_height_buffer(origin_x: i64, origin_z: i64, seed: u32) -> Vec<f32> {
+    let n = SIZE;
+    let stride = (n + 2) as usize;
+    let mut hbuf = vec![0.0f32; stride * stride];
+    for lx in -1..=n {
+        for lz in -1..=n {
+            let wx = origin_x + lx;
+            let wz = origin_z + lz;
+            let idx = ((lx + 1) as usize) * stride + ((lz + 1) as usize);
+            hbuf[idx] = surface_height_m(wx, wz, seed);
+        }
+    }
+    hbuf
+}
+
 /// Generate a deterministic chunk for the given coord + seed.
 ///
 /// The terrain height is a pure function of world X/Z (fBm), so adjacent chunks form
@@ -53,20 +117,13 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
         return chunk;
     }
 
-    // Precompute the surface-height field for this chunk's columns PLUS a 1-voxel border
-    // ring on every side (so slope at chunk edges samples the neighbouring chunk's columns
-    // without re-evaluating fBm per ly). Buffer is (n+2)^2 with a +1 index offset so that
-    // lx-1 / lz-1 (which reach into the neighbour chunk) stay in bounds.
+    // Surface-height field for this chunk's columns PLUS a 1-voxel border ring (so slope at
+    // chunk edges samples the neighbour column without re-evaluating fBm per ly). The field
+    // depends only on world X/Z, so it is IDENTICAL for every Y-slab in this (cx,cz) column —
+    // computed once and cached per thread, reused across the ~7-8 slabs the client streams per
+    // column (was rebuilt per slab). Buffer is (n+2)² with a +1 index offset.
     let stride = (n + 2) as usize;
-    let mut hbuf = vec![0.0f32; stride * stride];
-    for lx in -1..=n {
-        for lz in -1..=n {
-            let wx = origin.x + lx;
-            let wz = origin.z + lz;
-            let idx = ((lx + 1) as usize) * stride + ((lz + 1) as usize);
-            hbuf[idx] = surface_height_m(wx, wz, seed);
-        }
-    }
+    let hbuf = column_height_buffer(coord.x, coord.z, origin.x, origin.z, seed);
     let h_vox = |lx: i64, lz: i64| -> i64 {
         let idx = ((lx + 1) as usize) * stride + ((lz + 1) as usize);
         (hbuf[idx] / voxel_core::coords::VOXEL_SIZE_M) as i64
@@ -629,6 +686,88 @@ mod tests {
             ms < 500.0,
             "air-chunk gen too slow: {ms:.1} ms for 5000 chunks (early-out missing?)"
         );
+    }
+
+    /// Column height-cache (2026-07-15, CRON-herstart): the surface-height buffer is a pure
+    /// function of world X/Z (independent of chunk.y), so every Y-slab in a column shares ONE
+    /// buffer. The live client streams ~7-8 Y-slabs per column (`cy in 0..=max_cy`), so before
+    /// the cache `surface_height_m` (a ~7-fBm call) ran (n+2)² times PER slab = up to ~7x
+    /// redundant work per column. This test proves that generating a whole column (same cx/cz,
+    /// many cy) is markedly cheaper than generating the same number of DISTINCT columns.
+    /// RED before the per-column cache (both paths rebuild the buffer → roughly equal time).
+    #[test]
+    fn column_reuse_is_faster_than_distinct_columns() {
+        let seed = 7u32;
+        // cy must stay under the O(1) sky ceiling (origin.y_m = cy*4 m <= MAX_SURFACE_M=123 m,
+        // i.e. cy <= 30) so every slab actually builds/uses the height buffer.
+        let n = 28i64;
+        // Unique base coords per run so a sibling test on the same thread can't pre-warm them.
+        let base_cx = 900_001i64;
+        let base_cz = 800_003i64;
+
+        // Warm nothing; measure a single column (1 buffer build + n-1 cache hits).
+        let t_col = Instant::now();
+        for cy in 0..n {
+            let _ = generate_chunk(ChunkCoord::new(base_cx, cy, base_cz), seed);
+        }
+        let col_ms = t_col.elapsed().as_secs_f64() * 1000.0;
+
+        // Measure n DISTINCT columns at a single low cy (n buffer builds = cache misses).
+        let t_dist = Instant::now();
+        for k in 0..n {
+            let _ = generate_chunk(ChunkCoord::new(base_cx + 10_000 * (k + 1), 0, base_cz + 9_000 * (k + 1)), seed);
+        }
+        let dist_ms = t_dist.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!(
+            "[column-cache] {n} chunks: same-column {col_ms:.3} ms vs distinct-column {dist_ms:.3} ms \
+             ({:.2}x faster)",
+            dist_ms / col_ms.max(1e-6)
+        );
+        assert!(
+            col_ms < dist_ms * 0.6,
+            "per-column height cache missing: same-column {col_ms:.3} ms vs distinct-column \
+             {dist_ms:.3} ms (expected same-column < 0.6x)"
+        );
+    }
+
+    /// Correctness guard for the column cache: generation must stay deterministic and
+    /// seed-correct even when columns/seeds are interleaved through the shared cache. The
+    /// same (coord, seed) must yield an identical chunk before and after other columns/seeds
+    /// touch the cache; different seeds on the same column must NOT collide.
+    #[test]
+    fn column_cache_preserves_determinism_and_seed_isolation() {
+        let coord = ChunkCoord::new(5, 6, 9); // a real surface-spanning column
+        let a1 = generate_chunk(coord, 7);
+        // Interleave other columns and a different seed to exercise the cache/eviction path.
+        for k in 0..80i64 {
+            let _ = generate_chunk(ChunkCoord::new(1000 + k, 0, 2000 + k), 7);
+        }
+        let other_seed = generate_chunk(coord, 42);
+        let a2 = generate_chunk(coord, 7); // same coord+seed again, cache churned in between
+        // Deterministic: identical material at every voxel for the same (coord, seed).
+        for ly in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+            for lx in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                for lz in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                    let v = voxel_core::coords::LocalVoxel::new(lx, ly, lz);
+                    assert_eq!(a1.get(v).0, a2.get(v).0, "cache broke determinism at {lx},{ly},{lz}");
+                }
+            }
+        }
+        // Seed isolation: a different seed on the same column must differ somewhere (no
+        // key collision that reuses seed 7's buffer for seed 42).
+        let mut differs = false;
+        for ly in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+            for lx in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                for lz in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                    let v = voxel_core::coords::LocalVoxel::new(lx, ly, lz);
+                    if a1.get(v).0 != other_seed.get(v).0 {
+                        differs = true;
+                    }
+                }
+            }
+        }
+        assert!(differs, "different seeds must not collide in the column cache");
     }
 
     /// Helper: does a chunk contain any non-air voxel?
