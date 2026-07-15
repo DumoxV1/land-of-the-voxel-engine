@@ -43,11 +43,22 @@ fn high_fall_lands_on_thin_floor() {
         "player must come to rest, pos = {:?}",
         player.pos
     );
-    let feet = player.pos[1] - 0.9; // HALF[1]
+    let feet = player.pos[1] - voxel_player::HALF[1];
     assert!(
         (feet - 401.0).abs() < 0.1,
         "feet must rest on top of the y=400 floor (y=401), got feet={feet} pos={:?}",
         player.pos
+    );
+}
+
+/// The human reference avatar must be exactly 1.90 m tall (2026-07-15) so the terrain
+/// scale reads correctly when walking the world.
+#[test]
+fn player_is_1_90_m_tall() {
+    assert!(
+        (voxel_player::PLAYER_HEIGHT_M - 1.90).abs() < 1e-3,
+        "player height must be 1.90 m, got {}",
+        voxel_player::PLAYER_HEIGHT_M
     );
 }
 
@@ -76,7 +87,7 @@ fn floor_resolve_covers_full_footprint() {
         ctrl.step(&mut world, &mut player, Input::none(), 0.1);
     }
     assert!(player.on_ground, "must land, pos = {:?}", player.pos);
-    let feet = player.pos[1] - 0.9;
+    let feet = player.pos[1] - voxel_player::HALF[1];
     // The hitbox overlaps the y=402 step, so feet must rest on its top (y=403) —
     // resting at y=401 means the resolver ignored the overlapped column (audit bug).
     assert!(

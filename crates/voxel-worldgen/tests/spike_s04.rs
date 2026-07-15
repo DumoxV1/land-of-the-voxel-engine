@@ -3,9 +3,9 @@
 //! implementation yields compile errors (RED). After minimal implementation they go GREEN.
 
 use voxel_core::chunk::Chunk;
-use voxel_core::coords::ChunkCoord;
+use voxel_core::coords::{ChunkCoord, VOXEL_SIZE_M};
 use voxel_core::palette::MaterialId;
-use voxel_worldgen::generate_chunk;
+use voxel_worldgen::{generate_chunk, surface_height_m};
 
 const CHUNK_SIZE: u8 = 32;
 
@@ -22,8 +22,21 @@ fn deterministic_same_seed_same_chunk() {
 
 #[test]
 fn different_seed_different_chunk() {
-    // Different seeds should produce different terrain for the same coord.
-    let c = ChunkCoord::new(0, 0, 0);
+    // Different seeds should produce different terrain for the same coord. Scan Y until we
+    // find a chunk that actually carries terrain for seed 0 (the deep (0,0,0) slab is empty
+    // below bedrock for every seed, so a fixed coord would make the test meaningless).
+    let mut surface = None;
+    for cy in 0..16i64 {
+        let c = ChunkCoord::new(0, cy, 0);
+        // Compare against an empty chunk with the SAME coord, so a genuinely empty chunk
+        // (Uniform AIR, no solid voxels) is detected as empty regardless of coord.
+        let empty = Chunk::uniform(c, MaterialId::from(0));
+        if generate_chunk(c, 0) != empty {
+            surface = Some(c);
+            break;
+        }
+    }
+    let c = surface.expect("expected a non-empty surface chunk for seed 0");
     let a = generate_chunk(c, 0);
     let b = generate_chunk(c, 999);
     assert_ne!(a, b, "different seeds should yield different chunks");
@@ -65,8 +78,13 @@ fn chunk_boundary_continuous() {
 
 #[test]
 fn non_empty_chunk() {
-    // A generated chunk should contain at least one solid voxel (no empty-world regressions).
-    let chunk = generate_chunk(ChunkCoord::new(0, 0, 0), 0);
+    // A generated chunk ON THE SURFACE should contain at least one solid voxel (no
+    // empty-world regressions). BEDROCK_DEPTH truncates deep chunks to AIR, so we must
+    // sample the chunk that actually contains the terrain surface, not a deep one.
+    let seed = 0u32;
+    let h_vox = (surface_height_m(0, 0, seed) / VOXEL_SIZE_M) as i64;
+    let surface_cy = h_vox / 32;
+    let chunk = generate_chunk(ChunkCoord::new(0, surface_cy, 0), seed);
     let mut solid = 0u32;
     for y in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
@@ -77,14 +95,18 @@ fn non_empty_chunk() {
             }
         }
     }
-    assert!(solid > 0, "generated chunk must contain solid voxels");
+    assert!(solid > 0, "surface chunk must contain solid voxels");
 }
 
 #[test]
 fn material_layers_are_sane() {
     // Topmost solid voxel in a column is a valid surface material (grass/sand/snow/stone);
     // air(0) is above it; the column below is solid. Biome selects the exact surface mat.
-    let chunk = generate_chunk(ChunkCoord::new(2, 0, 2), 42);
+    // Sample the chunk that actually contains the surface (BEDROCK truncates deep chunks).
+    let seed = 42u32;
+    let h_vox = (surface_height_m(2, 2, seed) / VOXEL_SIZE_M) as i64;
+    let surface_cy = h_vox / 32;
+    let chunk = generate_chunk(ChunkCoord::new(2, surface_cy, 2), seed);
     for x in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
             let mut top = None;

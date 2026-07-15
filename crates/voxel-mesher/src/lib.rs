@@ -196,9 +196,14 @@ fn greedy_layer(out: &mut Vec<(Triangle, MaterialId)>, view: &VoxView, axis: usi
     };
     let (u_axis, v_axis) = other_axes(axis);
 
-    let mut mask: Vec<Vec<Option<MaterialId>>> = vec![vec![None; n]; n];
+    // Flat mask buffer (n*n), allocated ONCE and reused across all `d` layers. The old
+    // code allocated a `Vec<Vec<_>>` of n*n entries *per layer* (6*n allocations/chunk) —
+    // pure GC churn on the rayon pool. Indexed as `i*n + j`.
+    let mut mask: Vec<Option<MaterialId>> = vec![None; n * n];
 
     for d in 0..n {
+        // Reset only the entries we will touch this layer.
+        mask.fill(None);
         for i in 0..n {
             for j in 0..n {
                 let (x, y, z) = coords_for(axis, u_axis, v_axis, d, i, j, n);
@@ -215,10 +220,11 @@ fn greedy_layer(out: &mut Vec<(Triangle, MaterialId)>, view: &VoxView, axis: usi
                         z - if axis == 2 { 1 } else { 0 },
                     )
                 };
+                let idx = i * n + j;
                 if view.is_solid(x, y, z) && !neighbour_solid {
-                    mask[i][j] = Some(view.material(x, y, z));
+                    mask[idx] = Some(view.material(x, y, z));
                 } else {
-                    mask[i][j] = None;
+                    mask[idx] = None;
                 }
             }
         }
@@ -226,15 +232,16 @@ fn greedy_layer(out: &mut Vec<(Triangle, MaterialId)>, view: &VoxView, axis: usi
         while i < n {
             let mut j = 0;
             while j < n {
-                if let Some(mat) = mask[i][j] {
+                let idx = i * n + j;
+                if let Some(mat) = mask[idx] {
                     let mut w = 1;
-                    while j + w < n && mask[i][j + w] == Some(mat) {
+                    while j + w < n && mask[i * n + (j + w)] == Some(mat) {
                         w += 1;
                     }
                     let mut h = 1;
                     'outer: while i + h < n {
                         for jj in j..j + w {
-                            if mask[i + h][jj] != Some(mat) {
+                            if mask[(i + h) * n + jj] != Some(mat) {
                                 break 'outer;
                             }
                         }
@@ -244,7 +251,7 @@ fn greedy_layer(out: &mut Vec<(Triangle, MaterialId)>, view: &VoxView, axis: usi
                     emit_merged_quad(out, axis, u_axis, v_axis, d, i, j, h, w, normal, mat);
                     for ii in i..i + h {
                         for jj in j..j + w {
-                            mask[ii][jj] = None;
+                            mask[ii * n + jj] = None;
                         }
                     }
                     j += w;

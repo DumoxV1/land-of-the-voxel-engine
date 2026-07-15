@@ -38,12 +38,19 @@ impl Server {
         }
     }
 
-    /// Add a player at a spawn position (above terrain; gravity settles it).
+    /// Add a player at a spawn position (above terrain; gravity settles it). `pos` is in
+    /// METERS (the public server API); the `Player` controller works in voxel units, so we
+    /// convert here.
     pub fn add_player(&mut self, id: u32, pos: [f32; 3]) {
+        let vox = [
+            pos[0] / voxel_core::coords::VOXEL_SIZE_M,
+            pos[1] / voxel_core::coords::VOXEL_SIZE_M,
+            pos[2] / voxel_core::coords::VOXEL_SIZE_M,
+        ];
         self.players.insert(
             id,
             Client {
-                player: Player::new(pos),
+                player: Player::new(vox),
                 ctrl: PlayerController::new(),
                 input: Input::none(),
             },

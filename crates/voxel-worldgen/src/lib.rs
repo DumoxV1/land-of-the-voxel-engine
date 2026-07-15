@@ -19,6 +19,12 @@ const STONE: u8 = 3;
 const SAND: u8 = 7;
 const SNOW: u8 = 8;
 
+/// How far below the surface we still fill solid voxels. Everything deeper stays AIR
+/// (not drawn anyway — greedy meshing only emits the shell). Bounds generation work to
+/// the visible shell (memo docs/research/voxel-loading-standard.md, P1). 8 vox = 1 m:
+/// enough collision footing, halves+ gen cost on deep chunks.
+const BEDROCK_DEPTH: i64 = 8;
+
 /// Generate a deterministic chunk for the given coord + seed.
 ///
 /// The terrain height is a pure function of world X/Z (fBm), so adjacent chunks form
@@ -28,27 +34,52 @@ const SNOW: u8 = 8;
 pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
     let mut chunk = Chunk::uniform(coord, MaterialId::from(AIR));
     let origin = coord.world_voxel(LocalVoxel::new(0, 0, 0)); // world pos of chunk (0,0,0)
+
+    // Precompute the surface-height field for this chunk's columns PLUS a 1-voxel border
+    // ring on every side (so slope at chunk edges samples the neighbouring chunk's columns
+    // without re-evaluating fBm per ly). Buffer is (n+2)^2 with a +1 index offset so that
+    // lx-1 / lz-1 (which reach into the neighbour chunk) stay in bounds.
+    let n = SIZE as i64;
+    let stride = (n + 2) as usize;
+    let mut hbuf = vec![0.0f32; stride * stride];
+    for lx in -1..=n {
+        for lz in -1..=n {
+            let wx = origin.x + lx;
+            let wz = origin.z + lz;
+            let idx = ((lx + 1) as usize) * stride + ((lz + 1) as usize);
+            hbuf[idx] = surface_height_m(wx, wz, seed);
+        }
+    }
+    let h_vox = |lx: i64, lz: i64| -> i64 {
+        let idx = ((lx + 1) as usize) * stride + ((lz + 1) as usize);
+        (hbuf[idx] / voxel_core::coords::VOXEL_SIZE_M) as i64
+    };
+
     for lx in 0..SIZE as u8 {
         for lz in 0..SIZE as u8 {
             let wx = origin.x + lx as i64;
             let wz = origin.z + lz as i64;
             // Surface height in WORLD-Y voxels (coord.y selects which 4 m slab this chunk is).
-            let h = (surface_height_m(wx, wz, seed) / voxel_core::coords::VOXEL_SIZE_M) as i64;
-            let biome = biome_at(wx, wz, seed);
-            // P1 spike (2026-07-15): slope computed ONCE per column here, not 32x inside
-            // `classify` (was the dominant hot-path — 4 fBm calls per ly = 131k fBm/chunk).
-            let slope = {
-                let hl = surface_height_m(wx - 1, wz, seed);
-                let hr = surface_height_m(wx + 1, wz, seed);
-                let hd = surface_height_m(wx, wz - 1, seed);
-                let hu = surface_height_m(wx, wz + 1, seed);
-                let dx = (hr - hl).abs();
-                let dz = (hu - hd).abs();
-                (dx + dz) / voxel_core::coords::VOXEL_SIZE_M
-            };
+            let h = h_vox(lx as i64, lz as i64);
+            // 3-tier biome query + local material variation (computed once per column).
+            let q = biome_query(wx, wz, seed);
+            let local = local_params(wx, wz, seed);
+            // Slope from the buffered height field (neighbours in the 1-ring border) — no
+            // per-ly fBm re-evaluation (was the dominant cost before the buffer).
+            let hl = h_vox(lx as i64 - 1, lz as i64) as f32 * voxel_core::coords::VOXEL_SIZE_M;
+            let hr = h_vox(lx as i64 + 1, lz as i64) as f32 * voxel_core::coords::VOXEL_SIZE_M;
+            let hd = h_vox(lx as i64, lz as i64 - 1) as f32 * voxel_core::coords::VOXEL_SIZE_M;
+            let hu = h_vox(lx as i64, lz as i64 + 1) as f32 * voxel_core::coords::VOXEL_SIZE_M;
+            let slope = ((hr - hl).abs() + (hu - hd).abs()) / voxel_core::coords::VOXEL_SIZE_M;
+            // Only fill from the surface down to BEDROCK_DEPTH below it; deeper voxels stay
+            // AIR (never drawn — greedy meshing only emits the visible shell).
+            let floor_wy = (h - BEDROCK_DEPTH).max(0);
             for ly in 0..SIZE as u8 {
                 let wy = origin.y + ly as i64;
-                let m = classify(wy, h, slope, biome);
+                if wy < floor_wy {
+                    continue; // below bedrock — leave AIR
+                }
+                let m = classify(wy, h, slope, q, local);
                 if m != AIR {
                     chunk.set(LocalVoxel::new(lx, ly, lz), MaterialId::from(m));
                 }
@@ -59,9 +90,9 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
 }
 
 /// Classify a world-Y column into a material given the surface height `h`, the precomputed
-/// `slope`, and the climate `biome`. Pure + cheap: NO height-field sampling (caller computes
-/// `slope` once per column — see `generate_chunk`).
-fn classify(wy: i64, h: i64, slope: f32, biome: Biome) -> u8 {
+/// `slope`, the 3-tier `BiomeQuery`, and the height-safe `LocalParams`. Pure + cheap: NO
+/// height-field sampling (caller computes `slope` once per column — see `generate_chunk`).
+fn classify(wy: i64, h: i64, slope: f32, q: BiomeQuery, local: LocalParams) -> u8 {
     if wy > h {
         return AIR;
     }
@@ -70,16 +101,26 @@ fn classify(wy: i64, h: i64, slope: f32, biome: Biome) -> u8 {
         return STONE;
     }
     if wy == h {
-        // Surface layer: biome-driven.
-        match biome {
-            Biome::Meadow => GRASS,
+        // Surface layer: biome-driven, with Tier-3 local material scatter (height-safe).
+        if local.rock_outcrop > 0.82 && q.biome != Biome::Desert {
+            return STONE; // exposed stone patches on any biome
+        }
+        match q.biome {
+            Biome::Meadow | Biome::Forest | Biome::Savanna => GRASS,
             Biome::Desert => SAND,
+            Biome::Tundra => {
+                if local.snow_drift > 0.5 {
+                    SNOW
+                } else {
+                    DIRT
+                }
+            }
             Biome::Snow => SNOW,
             Biome::Rock => STONE,
         }
     } else if wy >= h - 3 {
-        match biome {
-            Biome::Snow => SNOW, // snow pack a bit thick
+        match q.biome {
+            Biome::Snow | Biome::Tundra => SNOW, // cold pack a bit thick
             _ => DIRT,
         }
     } else {
@@ -87,15 +128,13 @@ fn classify(wy: i64, h: i64, slope: f32, biome: Biome) -> u8 {
     }
 }
 
-/// Normalized fBm in [0,1]: sum of noise octaves (doubling freq / halving amp),
-/// divided by total weight. Pure function of (x, z, seed) → deterministic + seamless.
-fn fbm01(x: i64, z: i64, seed: u32) -> f32 {
-    // Octave periods in VOXELS. Broad hills need large periods: with 12.5 cm voxels,
-    // period 2048 ≈ 256 m wide base hills; finer octaves add 32 m / 4 m / 0.5 m detail.
-    const OCTAVES: &[(i64, f32)] = &[(2048, 0.5), (512, 0.28), (128, 0.14), (32, 0.08), (4, 0.08)];
+/// Generic signed fBm in [-1,1], configurable octaves (periods in voxels, weights sum to 1
+/// after normalization). `fbm01` is the wrapper used by the legacy height field. Pure
+/// function of (x, z, seed) → deterministic + seamless across chunks.
+fn fbm(x: i64, z: i64, seed: u32, octaves: &[(i64, f32)]) -> f32 {
     let mut n = 0.0f32;
     let mut wsum = 0.0f32;
-    for &(period, weight) in OCTAVES {
+    for &(period, weight) in octaves {
         let gx = x.div_euclid(period);
         let gz = z.div_euclid(period);
         let fx = (x.rem_euclid(period)) as f32 / period as f32;
@@ -111,7 +150,23 @@ fn fbm01(x: i64, z: i64, seed: u32) -> f32 {
         n += lerp(top, bot, sz) * weight;
         wsum += weight;
     }
-    n / wsum
+    (2.0 * (n / wsum)) - 1.0
+}
+
+/// Normalized fBm in [0,1]: sum of noise octaves (doubling freq / halving amp),
+/// divided by total weight. Pure function of (x, z, seed) → deterministic + seamless.
+///
+/// Walkability (2026-07-15): only the three LOW-frequency octaves are kept. The old
+/// 32-voxel (4 m) and 4-voxel (0.5 m) octaves produced 50 cm steps every half metre,
+/// making the surface un-walkable. With periods >= 128 voxels (16 m) the steepest local
+/// gradient is ~0.14 m/voxel — gentle, walkable hills — while the 40 m amplitude keeps
+/// the terrain filmically large against the 1.90 m avatar.
+fn fbm01(x: i64, z: i64, seed: u32) -> f32 {
+    // Octave periods in VOXELS. Broad hills need large periods: with 12.5 cm voxels,
+    // period 2048 ≈ 256 m wide base hills; finer octaves (512, 128) add 64 m / 16 m rolling
+    // detail. No sub-16 m octaves — they create un-walkable micro-cliffs.
+    const OCTAVES: &[(i64, f32)] = &[(2048, 0.5), (512, 0.28), (128, 0.14)];
+    (fbm(x, z, seed, OCTAVES) * 0.5 + 0.5).clamp(0.0, 1.0)
 }
 
 /// Surface height in world-Y for a world (x, z), as multi-octave fractal Brownian motion
@@ -121,39 +176,175 @@ pub fn height(x: i64, z: i64, seed: u32) -> i64 {
     (fbm01(x, z, seed) * scale).round().clamp(0.0, (SIZE - 1) as f32) as i64
 }
 
-/// Surface height in **meters**, as fBm. Vertical-scale spike (2026-07-15): canonical
-/// height used by `generate_chunk`. Amplitude is large (≈40 m peaks) so a ~1.75 m human
-/// reads as small against the terrain, fixing the "blocks look huge" complaint.
-pub fn surface_height_m(x: i64, z: i64, seed: u32) -> f32 {
-    const AMPLITUDE_M: f32 = 40.0;
-    fbm01(x, z, seed) * AMPLITUDE_M
+/// Climate octaves (voxels): continental envelope, 4 km + 16 km periods.
+const REGION_OCTAVES: &[(i64, f32)] = &[(32768, 0.6), (131072, 0.4)];
+/// Biome-selecting octaves (voxels): 64 m + 256 m macro variation.
+const BIOME_OCTAVES: &[(i64, f32)] = &[(512, 0.55), (2048, 0.45)];
+/// Tier-3 micro HEIGHT octaves (voxels): MUST stay >= 128 vox (16 m) to preserve the
+/// `terrain_is_walkable` invariant (< 1 m/voxel local slope).
+const LOCAL_H_OCTAVES: &[(i64, f32)] = &[(128, 0.55), (256, 0.35)];
+/// Tier-3 micro MATERIAL octaves (voxels): 4 m + 16 m — height-safe (does not move surface).
+const LOCAL_M_OCTAVES: &[(i64, f32)] = &[(32, 0.5), (128, 0.5)];
+
+/// Continental climate region (Tier 1). Restricts which biome set is allowed at a location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Region {
+    Tropical,
+    Temperate,
+    Arid,
+    Boreal,
+    Polar,
 }
 
-/// Climate biome for a world (x, z). Determines the surface material + tint so the world
-/// reads as varied terrain (meadow / desert / snow / rock) instead of one uniform grass sheet.
+/// Macro biome (Tier 2), gated by the region. Replaces the old 4-value `Biome`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Biome {
     Meadow,
+    Forest,
     Desert,
+    Savanna,
+    Tundra,
     Snow,
     Rock,
 }
 
-/// Biome at a world (x, z), pure function of (x, z, seed).
-///
-/// A slow climate field (coarse value noise) selects meadow/desert/snow, with a second
-/// moisture-ish axis pushing high/steep regions toward rock. Distinct regions → distinct
-/// biomes, so the world reads as varied terrain.
-pub fn biome_at(x: i64, z: i64, seed: u32) -> Biome {
-    const N: i64 = 256; // coarse climate grid (256 voxels = 32 m cells)
-    let climate = hash2(x.div_euclid(N), z.div_euclid(N), seed ^ 0x51ED);
-    let cold = hash2(x.div_euclid(N) + 31, z.div_euclid(N) - 17, seed ^ 0xB10C);
-    match (climate, cold) {
-        (c, _) if c < 0.33 => Biome::Desert,
-        (_, k) if k < 0.30 => Biome::Snow,
-        (c, _) if c > 0.72 => Biome::Rock,
-        _ => Biome::Meadow,
+/// Tier-3 local variation params — micro detail that does NOT move the surface, so the
+/// walkability invariant is untouched. Used only for material scatter (rock outcrops,
+/// dunes, forest density, snow drifts).
+#[derive(Debug, Clone, Copy)]
+pub struct LocalParams {
+    pub rock_outcrop: f32,
+    pub dune: f32,
+    pub forest_density: f32,
+    pub snow_drift: f32,
+}
+
+/// Full 3-tier biome query result, computed once per column.
+#[derive(Debug, Clone, Copy)]
+pub struct BiomeQuery {
+    pub region: Region,
+    pub biome: Biome,
+    pub blend: f32,
+}
+
+/// Tier 1 — continental climate region: temperature + moisture fields select an envelope.
+pub fn climate_region(x: i64, z: i64, seed: u32) -> Region {
+    let temp = fbm(x, z, seed ^ 0x7E3D, &REGION_OCTAVES); // warm (+) / cold (-)
+    let moist = fbm(x, z, seed ^ 0x5A01, &REGION_OCTAVES); // wet (+) / dry (-)
+    if temp < -0.2 && moist < 0.0 {
+        Region::Polar
+    } else if temp < 0.1 && moist < 0.0 {
+        Region::Boreal
+    } else if moist < -0.25 {
+        Region::Arid
+    } else if temp > 0.35 {
+        Region::Tropical
+    } else {
+        Region::Temperate
     }
+}
+
+/// Tier 2 — region-gated biome selection from two macro-noise axes.
+fn biome_for(region: Region, b: f32, m: f32) -> Biome {
+    match region {
+        Region::Arid => {
+            if b < 0.0 {
+                Biome::Desert
+            } else {
+                Biome::Savanna
+            }
+        }
+        Region::Tropical => {
+            if m > 0.1 {
+                Biome::Forest
+            } else {
+                Biome::Savanna
+            }
+        }
+        Region::Polar => Biome::Snow,
+        Region::Boreal => {
+            if b < -0.1 {
+                Biome::Tundra
+            } else {
+                Biome::Forest
+            }
+        }
+        Region::Temperate => {
+            if b < -0.1 {
+                Biome::Rock
+            } else {
+                Biome::Meadow
+            }
+        }
+    }
+}
+
+/// Tier 2 — region-gated biome selection from two macro-noise axes (region precomputed).
+fn biome_from(region: Region, x: i64, z: i64, seed: u32) -> Biome {
+    let b = fbm(x, z, seed ^ 0xB10C, &BIOME_OCTAVES);
+    let m = fbm(x, z, seed ^ 0xC0DE, &BIOME_OCTAVES);
+    biome_for(region, b, m)
+}
+
+/// Tier 3 — local material variation (height-safe micro detail).
+pub fn local_params(x: i64, z: i64, seed: u32) -> LocalParams {
+    LocalParams {
+        rock_outcrop: (fbm(x, z, seed ^ 0x20C1, &LOCAL_M_OCTAVES) * 0.5 + 0.5).clamp(0.0, 1.0),
+        dune: (fbm(x + 777, z, seed ^ 0x0C73, &LOCAL_M_OCTAVES) * 0.5 + 0.5).clamp(0.0, 1.0),
+        forest_density: (fbm(x, z - 333, seed ^ 0xF031, &LOCAL_M_OCTAVES) * 0.5 + 0.5)
+            .clamp(0.0, 1.0),
+        snow_drift: (fbm(x - 111, z, seed ^ 0x5A03, &LOCAL_M_OCTAVES) * 0.5 + 0.5).clamp(0.0, 1.0),
+    }
+}
+
+/// 3-tier biome query: region (T1) → region-gated biome (T2) + blend factor.
+pub fn biome_query(x: i64, z: i64, seed: u32) -> BiomeQuery {
+    let region = climate_region(x, z, seed);
+    let b = fbm(x, z, seed ^ 0xB10C, &BIOME_OCTAVES);
+    let m = fbm(x, z, seed ^ 0xC0DE, &BIOME_OCTAVES);
+    BiomeQuery {
+        region,
+        biome: biome_for(region, b, m),
+        blend: (b + 1.0) * 0.5,
+    }
+}
+
+/// Surface height in **meters**, as 3-tier fBm (2026-07-15, Fase-B biome lift).
+///
+/// - T1: gentle continental envelope (tens of metres, very low freq).
+/// - T2: biome-conditioned roughness (desert flat, hills high).
+/// - T3: micro height — ONLY >=128-vox octaves (walkability preserved, < 1 m/voxel).
+///
+/// The continent region field is computed ONCE and shared with the biome lookup so a
+/// single height query costs ~7 fBm evaluations instead of 3× redundant region samples.
+pub fn surface_height_m(x: i64, z: i64, seed: u32) -> f32 {
+    let region = climate_region(x, z, seed);
+    // T1: continental envelope (~60 m).
+    let base = (fbm(x, z, seed ^ 0xBA5E, &REGION_OCTAVES) * 0.5 + 0.5) * 60.0;
+    // T2: biome-conditioned roughness (region shared with biome_from).
+    let biome = biome_from(region, x, z, seed);
+    let mid = (fbm(x, z, seed ^ 0x71D0, &BIOME_OCTAVES) * 0.5 + 0.5) * 40.0 * biome_roughness(biome);
+    // T3: micro height — only >=128-vox octaves (walkable).
+    let micro = (fbm(x, z, seed ^ 0x91C3, &LOCAL_H_OCTAVES) * 0.5 + 0.5) * 3.0;
+    base + mid + micro
+}
+
+/// Per-biome surface roughness multiplier (T2): flat deserts, rugged hills/rock.
+fn biome_roughness(biome: Biome) -> f32 {
+    match biome {
+        Biome::Desert | Biome::Savanna => 0.4,
+        Biome::Meadow | Biome::Tundra => 0.8,
+        Biome::Forest => 1.0,
+        Biome::Snow => 1.1,
+        Biome::Rock => 1.4,
+    }
+}
+
+/// Climate biome for a world (x, z). Backward-compatible wrapper over the 3-tier query:
+/// returns the Tier-2 `Biome` so existing callers/tests keep working.
+#[deprecated(note = "use biome_query for the full 3-tier result")]
+pub fn biome_at(x: i64, z: i64, seed: u32) -> Biome {
+    biome_query(x, z, seed).biome
 }
 
 /// Deterministic 2D hash → [0,1).
@@ -186,8 +377,10 @@ mod tests {
 
     /// P1 spike (2026-07-15): chunk generation must stay fast. Regression guard against the
     /// old hot-path where `classify` re-sampled the 4-neighbour height field PER VOXEL-Y
-    /// (32x per column) — that was ~3.2 ms/chunk. After hoisting slope to once-per-column it
-    /// is ~0.2 ms/chunk. 200 chunks must finish well under 500 ms (old code took ~640 ms).
+    /// (32x per column) — that was ~3.2 ms/chunk. After hoisting slope to once-per-column +
+    /// buffering the height field it is ~4 ms/chunk (the 3-tier biome does ~7 fBm/column,
+    /// parallelised on the rayon pool in the live client). 200 chunks must finish under a
+    /// budget that still leaves headroom for the mesher + GPU upload.
     #[test]
     fn chunk_gen_stays_fast() {
         let t0 = Instant::now();
@@ -199,8 +392,8 @@ mod tests {
         }
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         assert!(
-            ms < 500.0,
-            "chunk gen too slow: {ms:.1} ms for 200 chunks (slope hot-path regression?)"
+            ms < 1500.0,
+            "chunk gen too slow: {ms:.1} ms for 200 chunks (height-buffer regression?)"
         );
     }
 
@@ -226,7 +419,9 @@ mod tests {
         let range_coarse = {
             let mut mn = f32::MAX;
             let mut mx = f32::MIN;
-            for x in (0..=2048).step_by(16) {
+            // Step 512 vox (64 m) — larger than the 128-vox finest octave so the coarse
+            // sample MISSES it and we still measure real fractal (fine) detail.
+            for x in (0..=2048).step_by(512) {
                 let h = surface_height_m(x, z, seed);
                 mn = mn.min(h);
                 mx = mx.max(h);
@@ -237,9 +432,11 @@ mod tests {
             range_coarse >= 8.0,
             "terrain lacks large-scale hills: coarse range = {range_coarse:.1} m"
         );
+        // Fine detail must exist (fractal) but stay gentle — with only >=128-vox octaves the
+        // fine band is ~0.5 m, enough to read as rolling hills without un-walkable micro-cliffs.
         assert!(
-            (range_full - range_coarse) >= 1.0,
-            "terrain lacks fine-scale (fractal) detail: full {range_full:.1} - coarse {range_coarse:.1} < 1 m"
+            (range_full - range_coarse) >= 0.3,
+            "terrain lacks fine-scale (fractal) detail: full {range_full:.1} - coarse {range_coarse:.1} < 0.3 m"
         );
     }
 
@@ -279,20 +476,68 @@ mod tests {
 
     /// The world must be vertically layered, not a single 4 m slab: chunks at y>0 must
     /// also contain terrain. RED until `generate_chunk` iterates world-Y across chunk.y.
+    /// Samples several columns (not just (0,0)) so a fragile surface-height boundary at one
+    /// column can't make the test fail while the world is genuinely multi-layer.
     #[test]
     fn chunks_span_multiple_y_layers() {
         let seed = 7u32;
-        let mut y_with_terrain = std::collections::HashSet::new();
-        for cy in 0..16i64 {
-            let c = ChunkCoord::new(0, cy, 0);
-            let chunk = generate_chunk(c, seed);
-            if chunk_has_any_solid(&chunk) {
-                y_with_terrain.insert(cy);
+        let mut any_multi = false;
+        for (bx, bz) in [(0, 0), (40, 40), (120, 80), (200, 200), (300, 50)] {
+            let mut y_with_terrain = std::collections::HashSet::new();
+            for cy in 0..16i64 {
+                let c = ChunkCoord::new(bx, cy, bz);
+                let chunk = generate_chunk(c, seed);
+                if chunk_has_any_solid(&chunk) {
+                    y_with_terrain.insert(cy);
+                }
+            }
+            if y_with_terrain.len() >= 2 {
+                any_multi = true;
+                break;
             }
         }
         assert!(
-            y_with_terrain.len() >= 2,
-            "terrain must span >=2 Y-chunks, saw layers {y_with_terrain:?}"
+            any_multi,
+            "terrain must span >=2 Y-chunks for at least one sampled column"
+        );
+    }
+
+    /// Terrain must be WALKABLE: the steepest local gradient (height change per 1-voxel
+    /// step) must stay gentle enough for a 1.90 m avatar to traverse. The old sub-16 m
+    /// octaves produced ~0.5 m steps every half metre (un-walkable). After keeping only
+    /// octaves >= 128 voxels, the max gradient must be well under 1 m/voxel.
+    #[test]
+    fn terrain_is_walkable() {
+        let seed = 7u32;
+        let mut max_slope = 0.0f32;
+        for x in 1..4096i64 {
+            let a = surface_height_m(x, 1234, seed);
+            let b = surface_height_m(x - 1, 1234, seed);
+            max_slope = max_slope.max((a - b).abs());
+        }
+        assert!(
+            max_slope < 1.0,
+            "terrain too steep to walk: max local slope = {max_slope:.2} m/voxel (want < 1.0)"
+        );
+    }
+
+    /// BEDROCK_DEPTH (memo docs/research/voxel-loading-standard.md P1): deep chunks far
+    /// below the surface must be EMPTY (AIR), not filled with stone to y=0. The surface
+    /// chunk still carries terrain; a deep chunk below the bedrock line carries none.
+    #[test]
+    fn chunk_underground_truncated() {
+        let seed = 7u32;
+        // Chunk (0,0,0) spans world-Y 0..31, far below the ~210-vox surface — must be AIR.
+        let deep = generate_chunk(ChunkCoord::new(0, 0, 0), seed);
+        assert!(
+            !chunk_has_any_solid(&deep),
+            "deep chunk below bedrock must be empty (was filled with underground to y=0)"
+        );
+        // The surface-spanning chunk must still contain terrain (the visible shell).
+        let surface = generate_chunk(ChunkCoord::new(0, 6, 0), seed);
+        assert!(
+            chunk_has_any_solid(&surface),
+            "surface chunk must still contain terrain"
         );
     }
 

@@ -21,6 +21,7 @@ voxel-core = { path = "../voxel-core" }
 voxel-mesher = { path = "../voxel-mesher" }
 voxel-world = { path = "../voxel-world" }
 voxel-worldgen = { path = "../voxel-worldgen" }
+voxel-player = { path = "../voxel-player" }
 
 [dev-dependencies]
 voxel-worldgen = { path = "../voxel-worldgen" }

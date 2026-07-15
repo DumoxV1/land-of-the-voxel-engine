@@ -4,18 +4,24 @@
 //! the solid voxels of a `World` axis-by-axis (slide along walls, rest on ground). Renderer-
 //! agnostic: depends only on `voxel-core` + `voxel-world`.
 
-use voxel_core::coords::WorldVoxel;
+use voxel_core::coords::{WorldVoxel, VOXEL_SIZE_M};
 use voxel_core::palette::MaterialId;
 use voxel_world::World;
 
-/// Half-extents of the player's AABB hitbox (centered on `pos`).
-const HALF: [f32; 3] = [0.3, 0.9, 0.3];
-/// Gravity acceleration (world units / s^2).
-const GRAVITY: f32 = 24.0;
-/// Jump impulse (world units / s).
-const JUMP_SPEED: f32 = 8.0;
-/// Horizontal move speed (world units / s).
-const MOVE_SPEED: f32 = 5.0;
+/// Half-extents of the player's AABB hitbox in VOXEL units (the controller works in voxel
+/// coordinates; multiply by VOXEL_SIZE_M for meters). Width 2.4 vox = 0.30 m, height
+/// 2*7.6 = 15.2 vox = 1.90 m (human reference avatar, 2026-07-15) so the terrain scale
+/// reads correctly.
+pub const HALF: [f32; 3] = [2.4, 7.6, 2.4];
+/// Total player height in meters (2 * HALF[1] * VOXEL_SIZE_M) — the human reference avatar
+/// is exactly 1.90 m.
+pub const PLAYER_HEIGHT_M: f32 = 2.0 * HALF[1] * VOXEL_SIZE_M;
+/// Gravity acceleration (voxel units / s^2) ≈ 24.5 m/s^2.
+const GRAVITY: f32 = 196.0;
+/// Jump impulse (voxel units / s) ≈ 8 m/s (≈1.3 m jump).
+const JUMP_SPEED: f32 = 64.0;
+/// Horizontal move speed (voxel units / s) ≈ 1.5 m/s.
+const MOVE_SPEED: f32 = 12.0;
 /// Maximum physics sub-step (s) to avoid tunnelling through thin voxels at high speed.
 const MAX_SUB_DT: f32 = 0.02;
 /// Terminal fall speed (world units / s). Keeps per-substep displacement < 1 voxel so a

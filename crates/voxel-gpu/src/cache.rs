@@ -25,6 +25,9 @@ pub struct LruMeshCache {
     /// Max estimated RAM in bytes (e.g. 12 GB). 0 = unbounded.
     max_ram_bytes: u64,
     bytes_per_tri: u64,
+    /// Incrementally maintained triangle count. `estimated_ram` is O(1) instead of
+    /// re-summing the whole map on every eviction pass (was O(N^2) under pressure).
+    total_tris: u64,
 }
 
 impl LruMeshCache {
@@ -33,7 +36,8 @@ impl LruMeshCache {
             map: HashMap::new(),
             max_entries,
             max_ram_bytes,
-            bytes_per_tri: 32,
+            bytes_per_tri: 52, // Triangle = 9 f32 + 3 f32 + u32 material = 52 bytes
+            total_tris: 0,
         }
     }
 
@@ -47,8 +51,10 @@ impl LruMeshCache {
 
     /// Insert or refresh a mesh; records `frame` as last-seen. Then evicts if over budget.
     pub fn insert(&mut self, coord: ChunkCoord, tris: Vec<voxel_mesher::Triangle>, frame: u64) {
+        let n = tris.len() as u64;
         let entry = CachedMesh { tris, last_seen: frame };
         self.map.insert(coord, entry);
+        self.total_tris += n;
         self.evict_if_needed(frame);
     }
 
@@ -67,9 +73,9 @@ impl LruMeshCache {
         self.map.is_empty()
     }
 
+    /// O(1) RAM estimate via the incrementally maintained triangle count.
     fn estimated_ram(&self) -> u64 {
-        let tris: usize = self.map.values().map(|e| e.tris.len()).sum();
-        (tris as u64) * self.bytes_per_tri
+        self.total_tris * self.bytes_per_tri
     }
 
     /// Drop least-recently-visible entries until within both caps.
@@ -85,7 +91,9 @@ impl LruMeshCache {
                 .map(|(c, _)| *c);
             match victim {
                 Some(c) => {
-                    self.map.remove(&c);
+                    if let Some(e) = self.map.remove(&c) {
+                        self.total_tris -= e.tris.len() as u64;
+                    }
                 }
                 None => break,
             }

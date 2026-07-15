@@ -127,16 +127,48 @@ mod tests {
     use voxel_worldgen;
 
     #[test]
+    fn spawn_surface_chunk_meshes_on_frame_one() {
+        // White-screen guard (2026-07-15): the very first frame must be able to show
+        // terrain. The client targets the surface chunk directly under the spawn column
+        // as its frame-1 fallback, so that chunk MUST produce triangles synchronously.
+        // Regression: an old placeholder camera eye ([40,50,40]) streamed the wrong
+        // column and the fallback selected nothing -> clear-color flash (white screen).
+        use voxel_core::coords::{CHUNK_SIZE, VOXEL_SIZE_M};
+        let seed = 7u32;
+        let cx = 1i64; // spawn column (player on chunk (1,0,1) center)
+        let cz = 1i64;
+        let col_wx = (cx * CHUNK_SIZE + CHUNK_SIZE / 2) as i64;
+        let col_wz = (cz * CHUNK_SIZE + CHUNK_SIZE / 2) as i64;
+        let col_top_vox = (voxel_worldgen::surface_height_m(col_wx, col_wz, seed) / VOXEL_SIZE_M) as i64;
+        let cy = (col_top_vox / CHUNK_SIZE as i64).clamp(0, 12);
+        let coord = ChunkCoord::new(cx, cy, cz);
+        let chunk = voxel_worldgen::generate_chunk(coord, seed);
+        let tris = mesh_chunk_world_meters(&chunk);
+        assert!(
+            !tris.is_empty(),
+            "spawn surface chunk ({cx},{cy},{cz}) must produce triangles for frame-1 render"
+        );
+    }
+
+    #[test]
     fn mesh_chunk_offthread_streams_result() {
         // P3 proof: a chunk is generated+meshed on a rayon pool and arrives via the channel
         // without blocking the calling thread.
         let pool = mesh_pool();
         let (tx, rx) = crossbeam_channel::unbounded::<MeshResult>();
-        spawn_mesh(&pool, &tx, ChunkCoord::new(3, 0, 5), 1, 7);
+        // Use the chunk that actually contains the terrain surface (BEDROCK truncates deep
+        // chunks to AIR, so cy=0 alone would be empty far below the ~26 m surface).
+        let cx = 3i64;
+        let cz = 5i64;
+        let cy = (voxel_worldgen::surface_height_m(cx * 32 + 16, cz * 32 + 16, 7)
+            / voxel_core::coords::VOXEL_SIZE_M) as i64
+            / 32;
+        let coord = ChunkCoord::new(cx, cy, cz);
+        spawn_mesh(&pool, &tx, coord, 1, 7);
         let r = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("mesh result should arrive off-thread");
-        assert_eq!(r.coord, ChunkCoord::new(3, 0, 5));
+        assert_eq!(r.coord, coord);
         assert_eq!(r.gen, 1);
         assert!(!r.tris.is_empty(), "generated chunk must produce triangles");
     }
@@ -211,7 +243,12 @@ mod tests {
     #[test]
     fn negative_chunk_coords_yield_nonempty_mesh() {
         for &(cx, cz) in &[(-1, -1), (-5, 3), (2, -4)] {
-            let coord = ChunkCoord::new(cx, 0, cz);
+            // The chunk that contains the terrain surface for this (cx,cz) — BEDROCK
+            // truncates deep chunks to AIR, so we must target the surface chunk, not cy=0.
+            let cy = (voxel_worldgen::surface_height_m(cx * 32 + 16, cz * 32 + 16, 7)
+                / voxel_core::coords::VOXEL_SIZE_M) as i64
+                / 32;
+            let coord = ChunkCoord::new(cx, cy, cz);
             let chunk = voxel_worldgen::generate_chunk(coord, 7);
             let tris = mesh_chunk_world_meters(&chunk);
             assert!(
@@ -229,7 +266,14 @@ mod tests {
         use std::time::Duration;
         let pool = mesh_pool();
         let (tx, rx) = crossbeam_channel::unbounded::<MeshResult>();
-        let coord = ChunkCoord::new(2, 0, 2);
+        let coord = {
+            let cx = 2i64;
+            let cz = 2i64;
+            let cy = (voxel_worldgen::surface_height_m(cx * 32 + 16, cz * 32 + 16, 7)
+                / voxel_core::coords::VOXEL_SIZE_M) as i64
+                / 32;
+            ChunkCoord::new(cx, cy, cz)
+        };
         let gen = 1u64;
         spawn_mesh(&pool, &tx, coord, gen, 7);
 

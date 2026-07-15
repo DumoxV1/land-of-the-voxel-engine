@@ -94,30 +94,14 @@ impl LocalVoxel {
 }
 
 /// Euclidean division: floor division that rounds toward negative infinity.
-/// Unlike Rust's default `a / b` (truncating toward zero), this keeps the
-/// remainder in `[0, |b|)` for negative operands.
+/// Delegates to std `i64::div_euclid` (stable since 1.38), which has identical semantics.
 fn euclidean_div(a: i64, b: i64) -> i64 {
-    let q = a.div(b);
-    let r = a % b;
-    if (r < 0 && b > 0) || (r > 0 && b < 0) {
-        q - 1
-    } else {
-        q
-    }
+    a.div_euclid(b)
 }
 
-/// Euclidean remainder: always in `[0, |b|)`.
+/// Euclidean remainder: always in `[0, |b|)`. Delegates to std `i64::rem_euclid`.
 fn euclidean_rem(a: i64, b: i64) -> i64 {
-    let r = a % b;
-    if r < 0 {
-        if b < 0 {
-            r - b
-        } else {
-            r + b
-        }
-    } else {
-        r
-    }
+    a.rem_euclid(b)
 }
 
 #[cfg(test)]

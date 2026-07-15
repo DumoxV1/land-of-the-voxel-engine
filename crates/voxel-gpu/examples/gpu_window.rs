@@ -1,9 +1,8 @@
 //! S-12b / S-13 live GPU client: stream a micro-voxel world (12.5 cm/voxel) around
-//! a first-person free-fly camera (WASD + mouse-look). Chunks within `VIEW_RADIUS`
-//! of the camera are generated + meshed on the fly (chunk-streaming), so you can
-//! walk/fly through a real, open world — not a 2x2 stub.
-//!
-//! Run with: cargo run --release --example gpu_window -p voxel-gpu
+//! a first-person player avatar (1.90 m) that walks the terrain with voxel collision
+//! (WASD + Space to jump + mouse-look). Chunks within `VIEW_RADIUS` of the camera are
+//! generated + meshed on the fly (chunk-streaming). Run with:
+//! `cargo run --release --example gpu_window -p voxel-gpu`
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -13,11 +12,13 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes};
 
-use voxel_core::coords::{chunk_m_size, ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M};
+use voxel_core::coords::{ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M};
 use voxel_gpu::renderer::{GpuCamera, GpuScene};
-use voxel_gpu::{mesh_chunk_world_meters, mesh_pool, spawn_eye_y_m, MeshResult};
+use voxel_gpu::{mesh_chunk_world_meters, mesh_pool, MeshResult};
 use voxel_mesher::Triangle;
+use voxel_player::{Input, Player, PlayerController};
 use voxel_world::World;
+use voxel_worldgen::surface_height_m;
 
 /// Tracks in-flight chunk mesh requests so we can (a) avoid re-requesting a chunk that is
 /// already being generated, and (b) drop stale results when a newer request supersedes an
@@ -109,7 +110,7 @@ mod request_tracker_tests {
 
 /// View distance in chunks. On the 12.5 cm scale a 4 m chunk -> 32 chunks ~= 128 m view.
 const CHUNK_M: f32 = CHUNK_SIZE as f32 * VOXEL_SIZE_M; // 4 m (ADR-0005)
-const VIEW_RADIUS: i64 = 24; // ~96 m view radius
+const VIEW_RADIUS: i64 = 48; // ~192 m view radius (radial disc; lifts the world toward a 150 km² feel)
 /// Max VBO bytes we will fill. Matches the renderer's 256 MB staging cap. Once the
 /// streamed mesh set reaches this, we stop requesting new chunks for this frame — the
 /// rest pop in later as the camera moves / far chunks evict. Prevents the vertical-scale
@@ -118,43 +119,6 @@ const VBO_BYTES_CAP: usize = 256 * 1024 * 1024;
 /// Max chunks whose meshes we ingest from the worker channel per frame (P3 upload budget).
 const UPLOAD_BUDGET: usize = 64; // chunks uploaded/frame; raised from 4 after the
                                  // vertical-scale spike multiplied the streamed set
-
-/// Find the chunk nearest the camera (Manhattan distance in chunk space) that passes the
-/// frustum test — used by the "never go white" guard to seed at least one mesh on frame 1.
-/// Free function (no `&self`) so it can run while `scene` holds a `&mut self.scene` borrow.
-fn nearest_visible_chunk(
-    view_proj: &[[f32; 4]; 4],
-    half: f32,
-    half_y: f32,
-    ccx: i64,
-    ccz: i64,
-) -> Option<ChunkCoord> {
-    const MAX_Y: i64 = 12;
-    let frustum = voxel_gpu::renderer::Frustum::from_view_proj(view_proj);
-    let mut best: Option<(i64, ChunkCoord)> = None;
-    for dx in -VIEW_RADIUS..=VIEW_RADIUS {
-        for dz in -VIEW_RADIUS..=VIEW_RADIUS {
-            let cx = ccx + dx;
-            let cz = ccz + dz;
-            // Negative chunk coords are valid (i64 + Euclidean div) — do not skip.
-            for cy in 0..=MAX_Y {
-                let center = [
-                    (cx as f32 + 0.5) * CHUNK_M,
-                    (cy as f32 * CHUNK_M) + half_y * 0.5,
-                    (cz as f32 + 0.5) * CHUNK_M,
-                ];
-                if !frustum.intersects_aabb(center, half.max(half_y)) {
-                    continue;
-                }
-                let dist = dx.abs() + dz.abs();
-                if best.map_or(true, |(bd, _)| dist < bd) {
-                    best = Some((dist, ChunkCoord::new(cx, cy, cz)));
-                }
-            }
-        }
-    }
-    best.map(|(_, c)| c)
-}
 
 struct App {
     window: Option<Arc<Window>>,
@@ -169,6 +133,9 @@ struct App {
     mesh_rx: crossbeam_channel::Receiver<MeshResult>,
     requests: RequestTracker,
     camera: GpuCamera,
+    /// First-person avatar (1.90 m) that walks the terrain with voxel collision.
+    player: Player,
+    controller: PlayerController,
     // Input state.
     keys: HashSet<winit::keyboard::PhysicalKey>,
     yaw: f32,
@@ -202,8 +169,33 @@ impl Default for App {
             mesh_tx,
             mesh_rx,
             requests: RequestTracker::default(),
-            // First-person spawn: eye height set after we know the terrain in resumed().
-            camera: GpuCamera::new([40.0, 50.0, 40.0], -std::f32::consts::FRAC_PI_2, -0.4, 1.0),
+            // First-person spawn: place the 1.90 m avatar's feet on the terrain surface at
+            // the origin; camera eye is derived from the player each frame in update_camera.
+            // NB: the initial eye MUST match the spawn position, not a placeholder — otherwise
+            // the first frames stream + fall back around the wrong location and flash white
+            // until the camera snaps to the player (seen as a "white screen" at startup).
+            camera: {
+                let top_vox = (surface_height_m(48, 48, seed) / VOXEL_SIZE_M) as i64;
+                let spawn_vox = (top_vox as f32 + 1.0) + voxel_player::HALF[1];
+                let eye_y_vox = spawn_vox - voxel_player::HALF[1] + 13.6; // 1.7 m above feet
+                GpuCamera::new(
+                    [
+                        48.0 * VOXEL_SIZE_M,
+                        eye_y_vox * VOXEL_SIZE_M,
+                        48.0 * VOXEL_SIZE_M,
+                    ],
+                    -std::f32::consts::FRAC_PI_2,
+                    -0.4,
+                    1.0,
+                )
+            },
+            player: {
+                // Place in voxel units (the controller's coordinate space): spawn chunk
+                // (1,0,1) center is world (6 m, 6 m) = voxel (48, 48).
+                let top_vox = (surface_height_m(48, 48, seed) / VOXEL_SIZE_M) as i64;
+                Player::new([48.0, (top_vox as f32 + 1.0) + voxel_player::HALF[1], 48.0])
+            },
+            controller: PlayerController::new(),
             keys: HashSet::new(),
             yaw: -std::f32::consts::FRAC_PI_2,
             pitch: -0.4,
@@ -314,22 +306,26 @@ impl ApplicationHandler for App {
         self.scene = Some(scene);
 
         // First-person spawn: drop the camera onto the terrain at the spawn chunk.
-        // Use the canonical surface height (world-Y meters) so we spawn above real peaks.
+        // Spawn the 1.90 m avatar's feet on the terrain surface near the chunk (1,0,1)
+        // center; the camera eye is derived from the player each frame in `update_camera`.
         let spawn = ChunkCoord::new(1, 0, 1);
-        let center_wx = (spawn.x * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
-        let center_wz = (spawn.z * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
+        let center_wx = (spawn.x * CHUNK_SIZE + CHUNK_SIZE / 2) as i64;
+        let center_wz = (spawn.z * CHUNK_SIZE + CHUNK_SIZE / 2) as i64;
         let surface_m = voxel_worldgen::surface_height_m(center_wx, center_wz, self.seed);
-        let top_vox = (surface_m / 0.125) as i64;
-        // Eye ~120 voxels (15 m) above the surface so we look *over* the terrain,
-        // not into a cliff face (vertical-scale spike: peaks reach ~40 m now).
-        let eye_x = 1.5 * chunk_m_size();
-        let eye_z = 1.5 * chunk_m_size();
-        self.camera.eye = [eye_x, spawn_eye_y_m(top_vox, 120), eye_z];
+        let top_vox = (surface_m / VOXEL_SIZE_M) as i64;
+        // Player position is in voxel units; feet rest on the surface top voxel.
+        self.player = Player::new([
+            center_wx as f32,
+            (top_vox as f32 + 1.0) + voxel_player::HALF[1],
+            center_wz as f32,
+        ]);
+        // Eye is 1.7 m (13.6 vox) above the feet; report in meters.
+        let eye_y_m = ((top_vox as f32 + 1.0) + 13.6) * VOXEL_SIZE_M;
         println!(
-            "spawn: terrain top = {} voxels (~{:.2} m), eye_y = {:.2} m",
+            "spawn: terrain top = {} voxels (~{:.2} m), player eye_y ~= {:.2} m (1.90 m avatar)",
             top_vox,
             surface_m,
-            spawn_eye_y_m(top_vox, 120)
+            eye_y_m
         );
 
         if let Some(w) = &self.window {
@@ -418,51 +414,37 @@ impl ApplicationHandler for App {
 
 impl App {
     fn update_camera(&mut self) {
-        // Frame-rate independent free-fly: integrate movement with a real dt (seconds) so
-        // speed is in world-m/s regardless of FPS. Without dt, WASD added a fixed step every
-        // frame → "super fast at high FPS". See `voxel_gpu::free_fly_step` (unit-tested).
+        // Frame-rate independent: integrate movement with a real dt (seconds) so speed is
+        // in world-m/s regardless of FPS. The 1.90 m avatar walks the terrain via the
+        // voxel-player controller (collision + gravity); camera eye follows the player.
         let now = std::time::Instant::now();
         let dt = self.last_frame.elapsed().as_secs_f32().clamp(0.0, 0.1);
         self.last_frame = now;
-        // Build the key bitmask: W=1, S=2, D=4, A=8.
-        let mut keys = 0u8;
-        if self
-            .keys
-            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW))
-        {
-            keys |= 1;
-        }
-        if self
-            .keys
-            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyS))
-        {
-            keys |= 2;
-        }
-        if self
-            .keys
-            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD))
-        {
-            keys |= 4;
-        }
-        if self
-            .keys
-            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA))
-        {
-            keys |= 8;
-        }
-        // Comfortable fly speed on the 12.5 cm scale: 8 m/s base, Shift = 4x sprint.
-        let mut speed = 8.0;
-        if self
-            .keys
-            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ShiftLeft))
-            || self
-                .keys
-                .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ShiftRight))
-        {
-            speed *= 4.0;
-        }
-        self.camera.eye =
-            voxel_gpu::free_fly_step(self.camera.eye, self.yaw, self.pitch, dt, speed, keys);
+
+        let has = |code: winit::keyboard::KeyCode| {
+            self.keys
+                .contains(&winit::keyboard::PhysicalKey::Code(code))
+        };
+        let input = Input {
+            forward: has(winit::keyboard::KeyCode::KeyW),
+            back: has(winit::keyboard::KeyCode::KeyS),
+            left: has(winit::keyboard::KeyCode::KeyA),
+            right: has(winit::keyboard::KeyCode::KeyD),
+            jump: has(winit::keyboard::KeyCode::Space),
+        };
+        // Mouse-look drives facing; sync the player yaw so movement follows the camera.
+        self.player.yaw = self.yaw;
+        self.controller
+            .step(&mut self.world, &mut self.player, input, dt);
+
+        // Player position is in voxel units; the renderer camera works in meters.
+        // Eye sits 1.7 m (13.6 vox) above the feet.
+        let eye_y_vox = self.player.pos[1] - voxel_player::HALF[1] + 13.6;
+        self.camera.eye = [
+            self.player.pos[0] * VOXEL_SIZE_M,
+            eye_y_vox * VOXEL_SIZE_M,
+            self.player.pos[2] * VOXEL_SIZE_M,
+        ];
     }
 
     fn render_frame(&mut self) {
@@ -499,8 +481,14 @@ impl App {
         let half_y = 24.0; // terrain peaks ~40 m; pad for height + camera clearance
         const MAX_Y: i64 = 12; // hard cap on streamed vertical chunks (~48 m)
         let frustum = voxel_gpu::renderer::Frustum::from_view_proj(&self.camera.view_proj());
+        let r2 = VIEW_RADIUS * VIEW_RADIUS;
         for dx in -VIEW_RADIUS..=VIEW_RADIUS {
             for dz in -VIEW_RADIUS..=VIEW_RADIUS {
+                // Radial cull: only stream the disc (dx^2+dz^2 <= R^2), not the square —
+                // ~22% fewer columns at the same nominal view radius.
+                if dx * dx + dz * dz > r2 {
+                    continue;
+                }
                 let cx = ccx + dx;
                 let cz = ccz + dz;
                 // Only stream Y-slabs that can contain terrain: a column's surface height
@@ -509,7 +497,7 @@ impl App {
                 // raw 0..=MAX_Y sweep 13x the old chunk count -> multi-minute first load).
                 let col_wx = (cx * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
                 let col_wz = (cz * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
-                let col_top_vox = (voxel_worldgen::surface_height_m(col_wx, col_wz, self.seed) / 0.125) as i64;
+                let col_top_vox = (voxel_worldgen::surface_height_m(col_wx, col_wz, self.seed) / voxel_core::coords::VOXEL_SIZE_M) as i64;
                 let max_cy = ((col_top_vox + voxel_core::coords::CHUNK_SIZE as i64) / voxel_core::coords::CHUNK_SIZE as i64).min(MAX_Y);
                 // NOTE: negative chunk coords are valid (ChunkCoord is i64 + Euclidean div).
                 // Do NOT skip them — skipping caused the "white screen when flying into
@@ -527,9 +515,10 @@ impl App {
                     }
                     let coord = ChunkCoord::new(cx, cy, cz);
                     if let Some(m) = self.mesh_cache.get(&coord) {
-                        let slice = m.tris.clone();
-                        tris.extend_from_slice(&slice); // ready: draw (frustum-cull intact)
-                        vbo_bytes += slice.len() * std::mem::size_of::<voxel_mesher::Triangle>();
+                        // Borrow directly — extend_from_slice already copies; the prior
+                        // `.clone()` was a pure waste (52 B/tri of alloc + memcpy per chunk).
+                        tris.extend_from_slice(&m.tris);
+                        vbo_bytes += m.tris.len() * std::mem::size_of::<voxel_mesher::Triangle>();
                         // Mark recently visible (separate mutable borrow, after the immutable read).
                         self.mesh_cache.touch(&coord, self.frame);
                     } else if !self.requests.is_pending(&coord) {
@@ -556,15 +545,20 @@ impl App {
             } // dz
         } // dx
 
-        // Frame-1 fallback only: seed one visible chunk while async jobs are still pending.
+        // Frame-1 fallback only: seed the chunk directly under the camera (the surface
+        // chunk for the spawn column) so the very first frame already shows terrain
+        // instead of a white clear-flash. Frustum-based selection can miss the ground
+        // when the eye sits low and looks down, so we target the surface slab explicitly.
         if tris.is_empty() {
-            let vp = self.camera.view_proj();
-            if let Some(coord) = nearest_visible_chunk(&vp, half, half_y, ccx, ccz) {
-                let chunk = self.world.get_or_generate(coord);
-                let mesh = mesh_chunk_world_meters(&chunk);
-                self.mesh_cache.insert(coord, mesh.clone(), self.frame);
-                tris.extend_from_slice(&mesh);
-            }
+            let col_wx = (ccx * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
+            let col_wz = (ccz * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
+            let col_top_vox = (voxel_worldgen::surface_height_m(col_wx, col_wz, self.seed) / 0.125) as i64;
+            let cy = ((col_top_vox + voxel_core::coords::CHUNK_SIZE as i64) / voxel_core::coords::CHUNK_SIZE as i64).clamp(0, MAX_Y);
+            let coord = ChunkCoord::new(ccx, cy, ccz);
+            let chunk = self.world.get_or_generate(coord);
+            let mesh = mesh_chunk_world_meters(&chunk);
+            self.mesh_cache.insert(coord, mesh.clone(), self.frame);
+            tris.extend_from_slice(&mesh);
         }
 
         let frame = surface.get_current_texture();

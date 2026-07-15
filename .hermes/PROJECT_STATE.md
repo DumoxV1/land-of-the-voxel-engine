@@ -122,6 +122,35 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       NEAR_WHITE=0.27%, CLEAR=0% (geen wit). 36/36 groen. Echte 150-200m filmische
       schaal = Fase 5 (LOD/clipmap), niet nu (blaaast VBO zonder LOD).
 
+27j. ✅ Eerste loopbaar karakter (2026-07-15): 1.90 m avatar met voxel-collision.
+      `voxel-player` HALF[1] 0.9→0.95 (PLAYER_HEIGHT_M=1.90 pub). `gpu_window` switcht van
+      free-fly naar `Player`/`PlayerController`: WASD→Input, Space=jump, mouse-look→yaw,
+      camera.eye = player.pos + ooghoogte (~1.7m). Spawn: voeten op surface (center_wx/z).
+      Test `player_is_1_90_m_tall` + bestaande collision-audits groen; 36/36 groen.
+      Live: spawn eye_y ~= 28.08 m (was 41.25 fly). Geen regressie (CLEAR=0%, VBO-warn=0).
+27k. 📋 Onderzoek voxel-loading (2026-07-15): memo docs/research/voxel-loading-standard.md.
+      Bevinding: ondergrond wordt volledig gegenereerd (tot y=0) maar NIET getekend (greedy
+      mesh = face-culling, alleen shell). Standaard = volledige storage + shell-mesh.
+      Verspilling zit in generate (ondergrond tot bodem). Aanbeveling: BEDROCK_DEPTH=8
+      (1m) in generate_chunk (P1-verbetering, geen render-regressie). Kanban-vraag open.
+
+27l. ✅ Performance + 150 km²-nacht (2026-07-15, autonome sessie): 3 research-subagents
+      (chunk-loader perf, 150km²+biomes-3tier, per-file review) + uitvoering. Geverifieerd
+      (83/83 tests groen, live capture UNIQUE=3123 / NEAR_WHITE=0.1% bij view-radius 48):
+      - T2 LruMeshCache bytes_per_tri 32→52 (RAM-cap correctheid).
+      - T3 coords.rs euclidean→std div_euclid/rem_euclid.
+      - T4 gpu_window redundante tris.clone() verwijderd (per-frame churn weg).
+      - T5 LruMeshCache O(N²) eviction→incrementele total_tris-teller.
+      - T6 greedy_mesh nested Vec<Vec<>>→flat buffer (alloc-reductie).
+      - T8 **3-TIER BIOMES**: Region(klimaat)→Biome(7 types)→LocalParams(rock/dune/
+        forest/snow), surface_height_m 3-tier, classify aangepast, gen geoptimaliseerd
+        (height-buffer + gedeelde region-fBm). Walkability behouden (<1 m/vox).
+      - T9 view-radius 24→48 (~192 m) + radiale cull (schijf i.p.v. vierkant, ~22%
+        minder kolommen). 150 km² = addressable wereld (i64), LOD/clipmap nog Fase 5.
+      - T1 (hash-constante "fix") TERUGGEROEPEN: nieuwe constante gaf vlakkere terrain
+        (fine-detail 0.5→0.0 m) — kwantiteit≠kwaliteit, oude hash beter voor variatie.
+      - Shader-spike in renderer.rs: ONGEcommit (wacht op user A/B/C/D).
+
 ## Auditwaarschuwing
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
 
