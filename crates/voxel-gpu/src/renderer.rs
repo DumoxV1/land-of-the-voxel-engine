@@ -34,7 +34,7 @@ pub struct GpuVertex {
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub fog_color: [f32; 4],
-    pub params: [f32; 4],  // x = fog_density
+    pub params: [f32; 4],  // x = fog_density, y = time_of_day (0..1, F2 dag/nacht), z/w reserved
     pub eye_pos: [f32; 4], // xyz = camera eye (fog distance reference), w unused
 }
 
@@ -524,6 +524,7 @@ impl GpuScene {
         tris: &[Triangle],
         camera: &GpuCamera,
         target_view: &'a wgpu::TextureView,
+        time_of_day: f32,
     ) -> anyhow::Result<wgpu::Buffer> {
         let mut verts: Vec<GpuVertex> = Vec::with_capacity(tris.len() * 3);
         for t in tris {
@@ -583,7 +584,7 @@ impl GpuScene {
         let cu = CameraUniform {
             view_proj: camera.view_proj(),
             fog_color: [0.62, 0.66, 0.74, 1.0],
-            params: [0.012, 0.0, 0.0, 0.0],
+            params: [0.012, time_of_day, 0.0, 0.0],
             eye_pos: [camera.eye[0], camera.eye[1], camera.eye[2], 0.0],
         };
         self.queue
@@ -668,7 +669,7 @@ impl GpuScene {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("voxel-enc"),
             });
-        self.record_pass(&mut encoder, tris, camera, &target_view)?;
+        self.record_pass(&mut encoder, tris, camera, &target_view, 0.3)?;
         self.queue.submit(Some(encoder.finish()));
 
         // Read back.
@@ -743,13 +744,14 @@ impl GpuScene {
         tris: &[Triangle],
         camera: &GpuCamera,
         surface_view: &wgpu::TextureView,
+        time_of_day: f32,
     ) -> anyhow::Result<()> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("voxel-window-enc"),
             });
-        self.record_pass(&mut encoder, tris, camera, surface_view)?;
+        self.record_pass(&mut encoder, tris, camera, surface_view, time_of_day)?;
         self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
@@ -788,7 +790,7 @@ impl GpuScene {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("bench-enc"),
             });
-        self.record_pass(&mut encoder, tris, camera, &target_view)?;
+        self.record_pass(&mut encoder, tris, camera, &target_view, 0.3)?;
         self.queue.submit(Some(encoder.finish()));
         // Block until the GPU has actually executed the submitted work. This is the
         // frame's real cost proxy (no surface present, no readback).
@@ -1106,23 +1108,46 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     // Toon-map naar warme, filmische saturatie.
     albedo = pow(albedo, vec3<f32>(0.85, 0.9, 0.95));
 
+    // --- Dag/nacht-cyclus (F2): time_of_day in cam.params.y (0..1 = 1 dag). ---
+    let tod = cam.params.y;
+    // Zon-hoogte: -1 (middernacht) .. 1 (noon). Azimut draait rond.
+    let sun_phase = tod * 6.2831853;
+    let sun_elev = sin(sun_phase - 1.5707963);          // -1..1
+    let sun_dir = normalize(vec3<f32>(
+        cos(sun_phase) * 0.5,
+        max(0.04, sun_elev),
+        sin(sun_phase) * 0.5,
+    ));
+    // Dag/licht-fractie: 0 nacht, 1 middag. Zachte schemering bij opkomst/ondergang.
+    let day = smoothstep(-0.15, 0.25, sun_elev);
+    // Warmte bij schemering (gouden uur): piek rond sun_elev ~ 0.
+    let golden = exp(-pow(sun_elev / 0.35, 2.0));       // 0..1, max bij horizon
+    // Lucht-gradient: horizon -> zenith, koeler bij dag, warm bij schemering.
+    let horizon = mix(vec3<f32>(0.20, 0.22, 0.30), vec3<f32>(0.62, 0.74, 0.92), day);
+    let zenith  = mix(vec3<f32>(0.05, 0.06, 0.12), vec3<f32>(0.28, 0.45, 0.85), day);
+    let horizon_warm = mix(horizon, vec3<f32>(0.95, 0.55, 0.30), golden * 0.8);
+    // Verticale lucht-tint voor de achtergrond (gebruikt indien fragment = lucht).
+    let bg_sky = mix(horizon_warm, zenith, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
+
     // --- Zachte hemel-lighting i.p.v. harde directional (filmischer, LoL-achtig). ---
-    let sky_tint = vec3<f32>(0.62, 0.74, 0.92);   // koel zonlicht/hemel
+    let sky_tint = mix(bg_sky, vec3<f32>(0.62, 0.74, 0.92), day);   // oude tint bij dag, warm bij schemering
     let ground_tint = vec3<f32>(0.35, 0.28, 0.22); // warme bounce vanonder
     let hemi = sky_tint * sky + ground_tint * (1.0 - sky);
-    let ambient = 0.35;
+    let ambient = mix(0.10, 0.38, day);            // donkerder 's nachts
     // Zachte key-light voor vorm, geen harde schaduwranden.
-    let L = normalize(vec3<f32>(0.35, 0.85, 0.28));
-    let diff = max(dot(n, L), 0.0);
+    let L = sun_dir;
+    let diff = max(dot(n, L), 0.0) * day;
     // Crevice-AO: donkere nagels in holtes/naadjes via dezelfde ruis (verschoven).
     let ao = 0.75 + 0.25 * fract(sin(dot(floor(p * 2.0 + 7.0), vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
 
     var col = albedo * (hemi * (ambient + 0.55) + vec3<f32>(1.0, 0.96, 0.88) * 0.35 * diff) * ao;
-    col += m.emissive.rgb;
+    col += m.emissive.rgb * day;
 
     let dist = length(in.world_pos - cam.eye_pos.xyz);
     let fog = 1.0 - exp(-cam.params.x * dist);
-    col = mix(col, cam.fog_color.xyz, clamp(fog, 0.0, 0.85));
+    // Fog-kleur volgt de lucht (warm bij schemering, koel bij dag, donker bij nacht).
+    let fog_col = mix(bg_sky, vec3<f32>(0.10, 0.12, 0.20), (1.0 - day) * 0.6);
+    col = mix(col, fog_col, clamp(fog, 0.0, 0.85));
     return vec4<f32>(col, 1.0);
 }
 "#;

@@ -114,3 +114,81 @@ fn per_axis_slide_along_wall() {
         player.pos[2] - before_z
     );
 }
+
+/// A flat world with a 1-voxel-high ledge: floor at Y=0 everywhere, plus a raised
+/// plateau (floor at Y=1) for x >= 100. Tests that the avatar can walk *up* a gentle
+/// rise instead of being blocked by the 1-voxel step (the "can't walk up a hill" bug).
+fn ledge_world() -> World {
+    let mut w = flat_world();
+    for x in 100..256 {
+        for z in -64..256 {
+            w.set_voxel(WorldVoxel::new(x, 1, z), MaterialId::from(3));
+        }
+    }
+    w
+}
+
+#[test]
+fn walks_up_one_voxel_ledge() {
+    let mut world = ledge_world();
+    // Start on the low floor (feet on Y=0) just before the ledge at x=100, facing +X.
+    let mut player = Player::new([96.0, 8.0, 64.0]);
+    let mut ctrl = PlayerController::new();
+    player.yaw = 0.0;
+    let start_y = player.pos[1];
+    // Walk forward across the ledge boundary (x=100) long enough to cross it.
+    for _ in 0..200 {
+        ctrl.step(&mut world, &mut player, Input::forward(), 0.016);
+    }
+    // Must have advanced into / past the ledge.
+    assert!(
+        player.pos[0] > 100.0,
+        "player should walk up and over the 1-voxel ledge (x={:.1}, stuck below 100)",
+        player.pos[0]
+    );
+    // And the avatar should now be standing on the raised floor (center y ~ 1 + HALF[1]),
+    // i.e. noticeably above the start height — proving it stepped up, not floated/jumped.
+    assert!(
+        player.pos[1] > start_y + 0.5,
+        "player should have stepped UP onto the ledge (y went {:.2} -> {:.2})",
+        start_y,
+        player.pos[1]
+    );
+}
+
+/// REGRESSION (step-up refactor): horizontal movement while airborne must NOT flag
+/// `on_ground`, otherwise the player can jump mid-air (Space while falling). The
+/// `on_ground` flag must be owned exclusively by the Y-axis gravity/floor resolution,
+/// never by a flat horizontal step.
+#[test]
+fn horizontal_move_while_airborne_is_not_grounded() {
+    let mut world = flat_world();
+    // Player truly airborne, 16 voxels above the floor (y=0).
+    let mut player = Player::new([64.0, 16.0, 64.0]);
+    player.yaw = 0.0;
+    let mut ctrl = PlayerController::new();
+    // A plain forward step in mid-air.
+    ctrl.step(&mut world, &mut player, Input::forward(), 0.1);
+    assert!(
+        !player.on_ground,
+        "horizontal move in mid-air must not set on_ground (would allow mid-air jump)"
+    );
+    // A jump input while airborne must be ignored (no upward lift).
+    let before_y = player.pos[1];
+    ctrl.step(
+        &mut world,
+        &mut player,
+        Input {
+            forward: true,
+            jump: true,
+            ..Default::default()
+        },
+        0.1,
+    );
+    assert!(
+        player.pos[1] <= before_y + 1e-3,
+        "jump while airborne must not lift the player (got y={:.2}, was {:.2})",
+        player.pos[1],
+        before_y
+    );
+}

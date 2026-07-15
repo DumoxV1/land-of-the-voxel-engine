@@ -27,6 +27,9 @@ const MAX_SUB_DT: f32 = 0.02;
 /// Terminal fall speed (world units / s). Keeps per-substep displacement < 1 voxel so a
 /// 1-thick floor can never be tunnelled through (S-11 audit fix P-01).
 const TERMINAL_FALL_SPEED: f32 = 40.0;
+/// Max step-up height in voxels: lets the avatar walk up gentle slopes/ledges instead of
+/// being blocked by every 1-voxel rise (the "can't walk up a hill, only jump" bug).
+const STEP_HEIGHT: f32 = 1.0;
 
 /// A player avatar: position, facing yaw, and ground state.
 #[derive(Debug, Clone)]
@@ -34,6 +37,24 @@ pub struct Player {
     pub pos: [f32; 3],
     pub yaw: f32,
     pub on_ground: bool,
+}
+
+/// Movement mode toggled at runtime (e.g. press F): `Walk` collides with terrain and
+/// obeys gravity; `Fly` is free 6-DOF (no gravity, no collision) for exploration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerMode {
+    Walk,
+    Fly,
+}
+
+impl PlayerMode {
+    /// Toggle between walk and fly.
+    pub fn toggle(self) -> Self {
+        match self {
+            PlayerMode::Walk => PlayerMode::Fly,
+            PlayerMode::Fly => PlayerMode::Walk,
+        }
+    }
 }
 
 impl Player {
@@ -119,15 +140,30 @@ impl PlayerController {
             dz = dz / len * MOVE_SPEED * dt;
         }
 
-        // X axis (slide independent of Z).
-        let try_x = [player.pos[0] + dx, player.pos[1], player.pos[2]];
-        if !collides(world, &try_x) {
+        // X and Z steps each resolve from the SAME base Y (not chained), so a diagonal
+        // slope can't double-step (~2 vox/substep). Final Y is the highest of the two
+        // accepted steps; if neither stepped, Y is unchanged.
+        let base_y = player.pos[1];
+        let mut step_y = base_y;
+        // X axis (slide independent of Z); step up gentle rises instead of blocking.
+        let try_x = [player.pos[0] + dx, base_y, player.pos[2]];
+        if let Some(sy) = try_step(world, &try_x, base_y) {
             player.pos[0] = try_x[0];
+            step_y = step_y.max(sy);
         }
         // Z axis.
-        let try_z = [player.pos[0], player.pos[1], player.pos[2] + dz];
-        if !collides(world, &try_z) {
+        let try_z = [player.pos[0], base_y, player.pos[2] + dz];
+        if let Some(sy) = try_step(world, &try_z, base_y) {
             player.pos[2] = try_z[2];
+            step_y = step_y.max(sy);
+        }
+        // Apply the accepted step-up (if any) to the player's Y. NOTE: a flat horizontal
+        // move always returns `Some(base_y)` (try_step), so we must NOT derive `on_ground`
+        // from the horizontal step — that would flag the player as grounded while airborne
+        // and permit mid-air jumps. `on_ground` is owned exclusively by the Y-axis
+        // gravity/floor resolution below.
+        if step_y > base_y + 1e-3 {
+            player.pos[1] = step_y;
         }
 
         // Y axis (gravity + jump).
@@ -162,7 +198,64 @@ impl PlayerController {
     }
 }
 
-/// True if the player's AABB at `pos` overlaps any solid (non-air) voxel.
+/// Try to move the player's AABB to `target` (same x/z, possibly raised y). Returns the
+/// y to place the player at if the move is unobstructed, stepping up by at most
+/// `STEP_HEIGHT` voxels when a *wall* at the player's own level blocks the flat move.
+///
+/// Crucial: the flat-move check EXCLUDES the floor layer under the feet. The ground the
+/// player stands on must not count as "blocking" — otherwise we'd step up 1 voxel every
+/// frame and fly off to infinity (NaN eye -> streaming selects 0 chunks -> white screen).
+/// A genuine wall (solid voxel at the player's own level) still triggers the step-up.
+/// The raised position is only accepted if there is solid ground directly beneath the
+/// feet across the FULL footprint (so you climb a ledge, not a 1-voxel pillar). Returns
+/// `None` if even the max step-up is blocked.
+fn try_step(world: &mut World, target: &[f32; 3], base_y: f32) -> Option<f32> {
+    // Shift the AABB up 1 voxel so the foot-level floor is excluded from the wall test.
+    let floor_excluded = [target[0], target[1] + 1.0, target[2]];
+    if !collides(world, &floor_excluded) {
+        return Some(target[1]);
+    }
+    let steps = STEP_HEIGHT.ceil() as i32;
+    for s in 1..=steps {
+        let y = base_y + s as f32;
+        let raised = [target[0], y, target[2]];
+        let raised_floor_excl = [raised[0], y + 1.0, raised[2]];
+        if collides(world, &raised_floor_excl) {
+            continue; // still a wall at this height
+        }
+        // Require solid ground directly beneath the raised feet across the whole footprint
+        // (not just the center column), so we don't step onto a 1-voxel-wide pillar.
+        let foot_y = y - HALF[1] - 1.0;
+        let foot_min = [raised[0] - HALF[0], foot_y, raised[2] - HALF[2]];
+        let foot_max = [raised[0] + HALF[0], foot_y + 0.5, raised[2] + HALF[2]];
+        if !footprint_has_ground(world, &foot_min, &foot_max) {
+            continue;
+        }
+        return Some(y);
+    }
+    None
+}
+
+/// True if any solid voxel sits in the thin slab spanned by `min`/`max` (the foot layer),
+/// i.e. there is ground directly beneath the player's footprint.
+fn footprint_has_ground(world: &mut World, min: &[f32; 3], max: &[f32; 3]) -> bool {
+    let x0 = (min[0]).floor() as i64;
+    let x1 = (max[0]).floor() as i64;
+    let y0 = (min[1]).floor() as i64;
+    let y1 = (max[1]).floor() as i64;
+    let z0 = (min[2]).floor() as i64;
+    let z1 = (max[2]).floor() as i64;
+    for x in x0..=x1 {
+        for y in y0..=y1 {
+            for z in z0..=z1 {
+                if solid_at(world, x, y, z) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 fn collides(world: &mut World, pos: &[f32; 3]) -> bool {
     let min = [pos[0] - HALF[0], pos[1] - HALF[1], pos[2] - HALF[2]];
     let max = [pos[0] + HALF[0], pos[1] + HALF[1], pos[2] + HALF[2]];

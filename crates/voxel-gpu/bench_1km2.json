@@ -6,14 +6,14 @@
   "world_edge_m": 1000,
   "world_area_m2": 1000000,
   "world_area_km2": 1.0000,
-  "view_radius_chunks": 24,
-  "frames": 152,
+  "view_radius_chunks": 48,
+  "frames": 200,
   "render_w": 1024,
   "render_h": 768,
-  "avg_visible_triangles": 3038,
-  "p50_ms": 0.238,
-  "p95_ms": 0.486,
-  "p99_ms": 0.669,
-  "avg_ms": 0.275,
-  "avg_fps": 3636.31
+  "avg_visible_triangles": 243114,
+  "p50_ms": 7.318,
+  "p95_ms": 14.660,
+  "p99_ms": 16.835,
+  "avg_ms": 7.999,
+  "avg_fps": 125.01
 }

@@ -136,6 +136,8 @@ struct App {
     /// First-person avatar (1.90 m) that walks the terrain with voxel collision.
     player: Player,
     controller: PlayerController,
+    // Movement mode: Walk (collision + gravity) or Fly (free 6-DOF). Toggle with F.
+    mode: voxel_player::PlayerMode,
     // Input state.
     keys: HashSet<winit::keyboard::PhysicalKey>,
     yaw: f32,
@@ -150,6 +152,8 @@ struct App {
     surf_h: u32,
     // Last frame timestamp for dt-based movement (frame-rate independent free-fly).
     last_frame: std::time::Instant,
+    // Day/night phase (0..1, F2) — advances slowly each frame.
+    time_of_day: f32,
 }
 
 impl Default for App {
@@ -196,6 +200,7 @@ impl Default for App {
                 Player::new([48.0, (top_vox as f32 + 1.0) + voxel_player::HALF[1], 48.0])
             },
             controller: PlayerController::new(),
+            mode: voxel_player::PlayerMode::Walk,
             keys: HashSet::new(),
             yaw: -std::f32::consts::FRAC_PI_2,
             pitch: -0.4,
@@ -205,6 +210,7 @@ impl Default for App {
             surf_w: 1280,
             surf_h: 800,
             last_frame: std::time::Instant::now(),
+            time_of_day: 0.32, // F2 dag/nacht: start in de vroege ochtend (gouden uur)
         }
     }
 }
@@ -366,6 +372,20 @@ impl ApplicationHandler for App {
                 // held keys; no key triggers exit or panics.
                 if event.state == ElementState::Pressed {
                     self.keys.insert(event.physical_key);
+                    // F toggles walk <-> fly mode.
+                    if event.physical_key
+                        == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyF)
+                    {
+                        self.mode = self.mode.toggle();
+                        println!(
+                            "mode: {}",
+                            if self.mode == voxel_player::PlayerMode::Walk {
+                                "WALK"
+                            } else {
+                                "FLY"
+                            }
+                        );
+                    }
                 } else {
                     self.keys.remove(&event.physical_key);
                 }
@@ -434,8 +454,67 @@ impl App {
         };
         // Mouse-look drives facing; sync the player yaw so movement follows the camera.
         self.player.yaw = self.yaw;
-        self.controller
-            .step(&mut self.world, &mut self.player, input, dt);
+
+        match self.mode {
+            voxel_player::PlayerMode::Walk => {
+                // Walk: collide with terrain + gravity (controller handles step-up so you
+                // can climb gentle slopes/ledges instead of being blocked).
+                self.controller
+                    .step(&mut self.world, &mut self.player, input, dt);
+            }
+            voxel_player::PlayerMode::Fly => {
+                // Fly: free 6-DOF, no gravity, no collision. W/S move along the look
+                // direction, A/D strafe, Space up, Ctrl down.
+                let (sy, cy) = self.pitch.sin_cos();
+                let (sp, cp) = self.yaw.sin_cos();
+                let fwd = [cp * cy, sy, sp * cy];
+                let right = [cp, 0.0, sp];
+                let fly_speed = 40.0 * dt; // voxel units/s (~5 m/s)
+                let mut move_v = [0.0f32; 3];
+                if input.forward {
+                    move_v[0] += fwd[0];
+                    move_v[1] += fwd[1];
+                    move_v[2] += fwd[2];
+                }
+                if input.back {
+                    move_v[0] -= fwd[0];
+                    move_v[1] -= fwd[1];
+                    move_v[2] -= fwd[2];
+                }
+                if input.right {
+                    move_v[0] += right[0];
+                    move_v[1] += right[1];
+                    move_v[2] += right[2];
+                }
+                if input.left {
+                    move_v[0] -= right[0];
+                    move_v[1] -= right[1];
+                    move_v[2] -= right[2];
+                }
+                if input.jump {
+                    move_v[1] += 1.0;
+                }
+                if self
+                    .keys
+                    .contains(&winit::keyboard::PhysicalKey::Code(
+                        winit::keyboard::KeyCode::ControlLeft,
+                    ))
+                    || self.keys.contains(&winit::keyboard::PhysicalKey::Code(
+                        winit::keyboard::KeyCode::ControlRight,
+                    ))
+                {
+                    move_v[1] -= 1.0;
+                }
+                let mlen = (move_v[0] * move_v[0] + move_v[1] * move_v[1] + move_v[2] * move_v[2])
+                    .sqrt();
+                if mlen > 1e-6 {
+                    self.player.pos[0] += move_v[0] / mlen * fly_speed;
+                    self.player.pos[1] += move_v[1] / mlen * fly_speed;
+                    self.player.pos[2] += move_v[2] / mlen * fly_speed;
+                }
+                self.player.on_ground = false;
+            }
+        }
 
         // Player position is in voxel units; the renderer camera works in meters.
         // Eye sits 1.7 m (13.6 vox) above the feet.
@@ -449,6 +528,8 @@ impl App {
 
     fn render_frame(&mut self) {
         self.frame += 1;
+        // F2 dag/nacht: langzame cyclus (~1 volle dag per 10 min bij 60 FPS).
+        self.time_of_day = (self.time_of_day + 1.0 / (60.0 * 600.0)) % 1.0;
         let (Some(scene), Some(surface)) = (&mut self.scene, &self.surface) else {
             return;
         };
@@ -553,12 +634,21 @@ impl App {
             let col_wx = (ccx * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
             let col_wz = (ccz * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
             let col_top_vox = (voxel_worldgen::surface_height_m(col_wx, col_wz, self.seed) / 0.125) as i64;
-            let cy = ((col_top_vox + voxel_core::coords::CHUNK_SIZE as i64) / voxel_core::coords::CHUNK_SIZE as i64).clamp(0, MAX_Y);
-            let coord = ChunkCoord::new(ccx, cy, ccz);
-            let chunk = self.world.get_or_generate(coord);
-            let mesh = mesh_chunk_world_meters(&chunk);
-            self.mesh_cache.insert(coord, mesh.clone(), self.frame);
-            tris.extend_from_slice(&mesh);
+            // Surface slab is the chunk CONTAINING the surface voxel (div_euclid), not the
+            // one above it. Seed both the surface chunk and the one below it so the ground
+            // is guaranteed visible on frame 1 (GPT-sol review Q2: old formula picked the
+            // empty chunk above the surface, defeating the fallback).
+            let cy = col_top_vox.div_euclid(voxel_core::coords::CHUNK_SIZE as i64).clamp(0, MAX_Y);
+            for cy_seed in [cy.saturating_sub(1), cy] {
+                if cy_seed > MAX_Y {
+                    continue;
+                }
+                let coord = ChunkCoord::new(ccx, cy_seed, ccz);
+                let chunk = self.world.get_or_generate(coord);
+                let mesh = mesh_chunk_world_meters(&chunk);
+                self.mesh_cache.insert(coord, mesh.clone(), self.frame);
+                tris.extend_from_slice(&mesh);
+            }
         }
 
         let frame = surface.get_current_texture();
@@ -593,7 +683,7 @@ impl App {
         let view = tex
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        match scene.render_to_view(&tris, &self.camera, &view) {
+        match scene.render_to_view(&tris, &self.camera, &view, self.time_of_day) {
             Ok(()) => scene.queue().present(tex),
             Err(err) => log::error!(
                 "gpu_window: render failed (tris={}, surface={}x{}): {err:#}",
@@ -611,7 +701,7 @@ fn main() {
         "Land of the Voxel Engine — micro-voxel client (12.5 cm/voxel, {} m chunks, view radius {} chunks ~{:.0} m)",
         CHUNK_M, VIEW_RADIUS, VIEW_RADIUS as f32 * CHUNK_M
     );
-    println!("WASD = fly, Left-drag = look. Close window to exit.");
+    println!("WASD = move, Space = jump/up, Left-drag = look, F = toggle walk/fly. Close window to exit.");
     let mut app = App::default();
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.run_app(&mut app).expect("run app");
