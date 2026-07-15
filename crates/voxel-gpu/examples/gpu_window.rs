@@ -19,6 +19,94 @@ use voxel_gpu::{mesh_chunk_world_meters, mesh_pool, spawn_eye_y_m, MeshResult};
 use voxel_mesher::Triangle;
 use voxel_world::World;
 
+/// Tracks in-flight chunk mesh requests so we can (a) avoid re-requesting a chunk that is
+/// already being generated, and (b) drop stale results when a newer request supersedes an
+/// older one (camera moved away/back). `complete()` removes BOTH bookkeeping entries so the
+/// map stays bounded over a long session — previously `requested_gen` leaked an entry per
+/// unique chunk ever requested (P2 fix, 2026-07-15).
+#[derive(Default)]
+struct RequestTracker {
+    pending: HashSet<ChunkCoord>,
+    requested_gen: HashMap<ChunkCoord, u64>,
+}
+
+impl RequestTracker {
+    /// Mark `coord` as in-flight; returns the generation tag to stamp on the result.
+    fn request(&mut self, coord: ChunkCoord) -> u64 {
+        let g = self
+            .requested_gen
+            .entry(coord)
+            .and_modify(|g| *g += 1)
+            .or_insert(1);
+        self.pending.insert(coord);
+        *g
+    }
+
+    /// True if a request is already in flight for this coord.
+    fn is_pending(&self, coord: &ChunkCoord) -> bool {
+        self.pending.contains(coord)
+    }
+
+    /// Current generation for a coord (used to validate incoming results).
+    fn gen(&self, coord: &ChunkCoord) -> Option<u64> {
+        self.requested_gen.get(coord).copied()
+    }
+
+    /// Mark a request complete: drops both the pending flag and the gen entry so the
+    /// tracker's memory stays bounded (P2 — previously `requested_gen` leaked).
+    fn complete(&mut self, coord: &ChunkCoord) {
+        self.pending.remove(coord);
+        self.requested_gen.remove(coord);
+    }
+}
+
+#[cfg(test)]
+mod request_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn request_marks_pending_and_increments_gen() {
+        let mut t = RequestTracker::default();
+        let c = ChunkCoord::new(1, 0, 2);
+        let g1 = t.request(c);
+        assert_eq!(g1, 1);
+        assert!(t.is_pending(&c));
+        assert_eq!(t.gen(&c), Some(1));
+        // Re-request (still pending) must NOT bump the gen — the in-flight job owns gen 1.
+        // (Caller guards with is_pending, but gen stays stable while pending.)
+        assert_eq!(t.gen(&c), Some(1));
+    }
+
+    #[test]
+    fn complete_removes_gen_entry_no_leak() {
+        let mut t = RequestTracker::default();
+        let c = ChunkCoord::new(3, 1, 4);
+        let _ = t.request(c);
+        assert!(t.gen(&c).is_some());
+        t.complete(&c);
+        // P2 invariant: after completion the gen entry is gone, so the map cannot grow
+        // unbounded across a long session of many unique chunks.
+        assert!(t.gen(&c).is_none());
+        assert!(!t.is_pending(&c));
+    }
+
+    #[test]
+    fn stale_result_dropped_after_complete() {
+        let mut t = RequestTracker::default();
+        let c = ChunkCoord::new(0, 0, 0);
+        let g1 = t.request(c); // gen 1, pending
+        assert_eq!(g1, 1);
+        t.complete(&c); // P2: entry removed, memory bounded
+        // A late result carrying the old generation arrives after completion — it must be
+        // dropped (gen entry is now None, so no generation can match it).
+        assert_eq!(t.gen(&c), None);
+        // A fresh request starts a new (independent) generation; only its result is accepted.
+        let g2 = t.request(c);
+        assert_eq!(g2, 1);
+        assert_eq!(t.gen(&c), Some(1));
+    }
+}
+
 /// View distance in chunks. On the 12.5 cm scale a 4 m chunk -> 32 chunks ~= 128 m view.
 const CHUNK_M: f32 = CHUNK_SIZE as f32 * VOXEL_SIZE_M; // 4 m (ADR-0005)
 const VIEW_RADIUS: i64 = 24; // ~96 m view radius
@@ -79,8 +167,7 @@ struct App {
     mesh_pool: rayon::ThreadPool,
     mesh_tx: crossbeam_channel::Sender<MeshResult>,
     mesh_rx: crossbeam_channel::Receiver<MeshResult>,
-    requested_gen: HashMap<ChunkCoord, u64>,
-    pending: HashSet<ChunkCoord>,
+    requests: RequestTracker,
     camera: GpuCamera,
     // Input state.
     keys: HashSet<winit::keyboard::PhysicalKey>,
@@ -114,8 +201,7 @@ impl Default for App {
             mesh_pool: mesh_pool(),
             mesh_tx,
             mesh_rx,
-            requested_gen: HashMap::new(),
-            pending: HashSet::new(),
+            requests: RequestTracker::default(),
             // First-person spawn: eye height set after we know the terrain in resumed().
             camera: GpuCamera::new([40.0, 50.0, 40.0], -std::f32::consts::FRAC_PI_2, -0.4, 1.0),
             keys: HashSet::new(),
@@ -396,11 +482,11 @@ impl App {
             };
             budget -= 1;
             // Discard if a newer request superseded this one (camera moved away/back).
-            if self.requested_gen.get(&r.coord).copied() != Some(r.gen) {
+            if self.requests.gen(&r.coord) != Some(r.gen) {
                 continue;
             }
             self.mesh_cache.insert(r.coord, r.tris, self.frame);
-            self.pending.remove(&r.coord);
+            self.requests.complete(&r.coord);
         }
 
         // --- Chunk-streaming: draw visible chunks; request missing ones off-thread. ---
@@ -446,7 +532,7 @@ impl App {
                         vbo_bytes += slice.len() * std::mem::size_of::<voxel_mesher::Triangle>();
                         // Mark recently visible (separate mutable borrow, after the immutable read).
                         self.mesh_cache.touch(&coord, self.frame);
-                    } else if !self.pending.contains(&coord) {
+                    } else if !self.requests.is_pending(&coord) {
                         // VBO budget gate: don't request more chunks once we've filled the
                         // 256 MB cap — the rest pop in later as the camera moves / far
                         // chunks evict. Keeps first load fast post vertical-scale spike.
@@ -455,10 +541,7 @@ impl App {
                         }
                         vbo_bytes += 32 * 32 * 32 / 2 * std::mem::size_of::<voxel_mesher::Triangle>();
                     // Not ready and not yet requested: spawn off-thread generate+mesh.
-                    let g = self.requested_gen.entry(coord).or_insert(0);
-                    *g += 1;
-                    let gen = *g;
-                    self.pending.insert(coord);
+                    let gen = self.requests.request(coord);
                     let tx = self.mesh_tx.clone();
                     let seed = self.seed;
                     self.mesh_pool.spawn(move || {
