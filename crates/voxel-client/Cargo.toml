@@ -1,0 +1,28 @@
+[package]
+name = "voxel-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.27"
+image = "0.25"
+env_logger = "0.11"
+log = "0.4"
+futures = "0.3"
+anyhow = "1"
+winit = "0.30"
+crossbeam-channel = "0.5"
+num_cpus = "1"
+voxel-core = { path = "../voxel-core" }
+voxel-mesher = { path = "../voxel-mesher" }
+voxel-world = { path = "../voxel-world" }
+voxel-worldgen = { path = "../voxel-worldgen" }
+voxel-player = { path = "../voxel-player" }
+voxel-gpu = { path = "../voxel-gpu" }
+
+[dev-dependencies]
+voxel-worldgen = { path = "../voxel-worldgen" }
+futures = "0.3"

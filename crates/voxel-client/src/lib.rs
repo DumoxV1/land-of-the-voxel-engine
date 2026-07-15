@@ -1,8 +1,19 @@
 //! S-12b / S-13 live GPU client: stream a micro-voxel world (12.5 cm/voxel) around
 //! a first-person player avatar (1.90 m) that walks the terrain with voxel collision
 //! (WASD + Space to jump + mouse-look). Chunks within `VIEW_RADIUS` of the camera are
-//! generated + meshed on the fly (chunk-streaming). Run with:
-//! `cargo run --release --example gpu_window -p voxel-gpu`
+//! generated + meshed on the fly (chunk-streaming).
+//!
+//! This crate holds the client application (game loop, streaming worker pool, input,
+//! and the `App` that wires the renderer to the world). It was extracted from the old
+//! `voxel-gpu/examples/gpu_window.rs` so the client is a proper, testable crate rather
+//! than a monolithic example. Run the live window with:
+//! `cargo run --release --example gpu_window_main -p voxel-client`
+//!
+//! Architecture notes (2026-07-15 refactor):
+//! - Streaming is driven by `voxel_gpu::chunk_stream::ChunkScheduler` (close→far priority,
+//!   LOD rings, air-skip) + a bounded worker pool (`job_tx` channel, N worker threads).
+//! - Worker messages are two-phase (`voxel_gpu::WorkerMsg`): `Gen` (raw chunk for collision,
+//!   shipped first) then `Mesh` (triangles for drawing) — collision-first (A3).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -127,7 +138,7 @@ fn num_mesh_workers() -> usize {
     num_cpus::get().saturating_sub(1).max(2)
 }
 
-struct App {
+pub struct App {
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
     scene: Option<GpuScene>,
@@ -762,7 +773,9 @@ impl App {
     }
 }
 
-fn main() {
+/// Start the live client: build the app, the winit event loop, and run until the window
+/// closes. Kept thin on purpose — all client logic lives in `App` (this `lib.rs`).
+pub fn run() {
     env_logger::init();
     println!(
         "Land of the Voxel Engine — micro-voxel client (12.5 cm/voxel, {} m chunks, view radius {} chunks ~{:.0} m)",
