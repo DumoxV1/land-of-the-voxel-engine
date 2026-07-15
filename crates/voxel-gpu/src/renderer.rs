@@ -86,6 +86,39 @@ pub fn material_tint(mat: MaterialId) -> [f32; 3] {
     }
 }
 
+/// Per-material PBR parameters, indexed by the flat `material: u32` vertex attribute.
+/// Must match the WGSL `MaterialPbr` layout exactly (std140-ish, 3x vec4 = 48 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MaterialPbr {
+    pub albedo_tint: [f32; 4],
+    pub params: [f32; 4], // x=tiling, y=normal_scale, z=roughness, w=metallic
+    pub emissive: [f32; 4],
+}
+
+impl MaterialPbr {
+    /// Build the default palette from the warm `material_tint` set, with a tiling factor
+    /// that gives triplanar projection visible variation on big greedy quads.
+    pub fn defaults() -> Vec<MaterialPbr> {
+        (0..=7u8)
+            .map(|id| {
+                let t = material_tint(voxel_core::palette::MaterialId::from(id));
+                MaterialPbr {
+                    albedo_tint: [t[0], t[1], t[2], 1.0],
+                    // tiling: world-meters per texture repeat. 0.5 -> a 2m tile on a 4m quad.
+                    params: [0.5, 1.0, 0.8, 0.0],
+                    emissive: [0.0, 0.0, 0.0, 0.0],
+                }
+            })
+            .collect()
+    }
+}
+
+/// Clamp an i32 to a u8 byte (used when baking material tiles).
+fn clamp8(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
 /// Owns the GPU device/queue and the voxel pipeline. The pipeline is built lazily once the
 /// target texture format is known (offscreen vs window surface can differ).
 pub struct GpuScene {
@@ -93,6 +126,8 @@ pub struct GpuScene {
     queue: Arc<wgpu::Queue>,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Mijlpaal 4 P0: per-material data + albedo texture array + sampler, bound as group(1).
+    material_bg: wgpu::BindGroup,
     camera_buf: wgpu::Buffer,
     depth_view: wgpu::TextureView,
     width: u32,
@@ -140,7 +175,11 @@ impl GpuScene {
     fn build_pipeline(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-    ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+    ) -> (
+        wgpu::RenderPipeline,
+        wgpu::BindGroupLayout,
+        wgpu::BindGroupLayout,
+    ) {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("voxel-shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(VOXEL_WGSL)),
@@ -158,9 +197,41 @@ impl GpuScene {
                 count: None,
             }],
         });
+        // Mijlpaal 4 P0: group(1) = material storage buffer + albedo 2D array + sampler.
+        let material_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("material-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("voxel-pipeline-layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&material_bgl)],
             immediate_size: 0,
         });
         let vbuf_layout = wgpu::VertexBufferLayout {
@@ -219,7 +290,7 @@ impl GpuScene {
             multiview_mask: None,
             cache: None,
         });
-        (pipeline, bind_group_layout)
+        (pipeline, bind_group_layout, material_bgl)
     }
 
     fn make_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
@@ -241,11 +312,125 @@ impl GpuScene {
             .create_view(&wgpu::TextureViewDescriptor::default())
     }
 
+    /// Mijlpaal 4 P0: build the material storage buffer, the albedo `texture_2d_array`
+    /// (one layer per material, each a small tinted + noise tile so triplanar projection
+    /// yields visible surface variation) and an anisotropic sampler. Returns the group(1)
+    /// bind group. Kept small (TILE x TILE) on purpose — VRAM scales with #materials, not voxels.
+    fn build_material_resources(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        material_bgl: &wgpu::BindGroupLayout,
+    ) -> wgpu::BindGroup {
+        let materials = MaterialPbr::defaults();
+        let mat_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("material-pbr-buf"),
+            size: (materials.len() * std::mem::size_of::<MaterialPbr>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&mat_buf, 0, bytemuck::cast_slice(&materials));
+
+        // 16x16 tiling per material; tinted base + cheap value-noise variation.
+        const TILE: u32 = 16;
+        let layer_count = materials.len() as u32;
+        let mut rgba = Vec::with_capacity((TILE * TILE * layer_count) as usize * 4);
+        for m in &materials {
+            let base = [
+                (m.albedo_tint[0] * 255.0) as u8,
+                (m.albedo_tint[1] * 255.0) as u8,
+                (m.albedo_tint[2] * 255.0) as u8,
+                255,
+            ];
+            for y in 0..TILE {
+                for x in 0..TILE {
+                    // Deterministic value noise (hash) so the tile has stable variation.
+                    let h = ((x * 73 + y * 191 + 17) % 31) as f32 / 31.0;
+                    let v = (h - 0.5) * 38.0; // +/- variation
+                    let r = clamp8(base[0] as i32 + v as i32);
+                    let g = clamp8(base[1] as i32 + v as i32);
+                    let b = clamp8(base[2] as i32 + v as i32);
+                    rgba.extend_from_slice(&[r, g, b, 255]);
+                }
+            }
+        }
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("albedo-array"),
+            size: wgpu::Extent3d {
+                width: TILE,
+                height: TILE,
+                depth_or_array_layers: layer_count,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(TILE * 4),
+                rows_per_image: Some(TILE),
+            },
+            wgpu::Extent3d {
+                width: TILE,
+                height: TILE,
+                depth_or_array_layers: layer_count,
+            },
+        );
+        let albedo_view = tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("material-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 16,
+            ..Default::default()
+        });
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material-bg"),
+            layout: material_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &mat_buf,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&albedo_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        })
+    }
+
     /// Initialize an offscreen (headless) GPU scene that renders to PNG at the given size.
     pub async fn new_offscreen(width: u32, height: u32) -> anyhow::Result<Self> {
         let (device, queue) = Self::bootstrap().await?;
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let (pipeline, bind_group_layout) = Self::build_pipeline(&device, format);
+        let (pipeline, bind_group_layout, material_bgl) = Self::build_pipeline(&device, format);
+        let material_bg = Self::build_material_resources(&device, &queue, &material_bgl);
         let depth_view = Self::make_depth(&device, width, height);
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera-uniform"),
@@ -258,6 +443,7 @@ impl GpuScene {
             queue,
             pipeline,
             bind_group_layout,
+            material_bg,
             camera_buf,
             depth_view,
             width,
@@ -298,7 +484,8 @@ impl GpuScene {
         height: u32,
         format: wgpu::TextureFormat,
     ) -> anyhow::Result<Self> {
-        let (pipeline, bind_group_layout) = Self::build_pipeline(&device, format);
+        let (pipeline, bind_group_layout, material_bgl) = Self::build_pipeline(&device, format);
+        let material_bg = Self::build_material_resources(&device, &queue, &material_bgl);
         let depth_view = Self::make_depth(&device, width, height);
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera-uniform"),
@@ -311,6 +498,7 @@ impl GpuScene {
             queue,
             pipeline,
             bind_group_layout,
+            material_bg,
             camera_buf,
             depth_view,
             width,
@@ -346,11 +534,20 @@ impl GpuScene {
         // --- Buffer pooling (S-12c deel 2): reuse one VBO across frames via
         // write_buffer instead of re-allocating a fresh buffer every frame.
         let needed = verts.len() * std::mem::size_of::<GpuVertex>();
+        // Keep the pool at or below the device's max buffer size; grow in safe steps.
+        let max_buf = self.device.limits().max_buffer_size.min(256 * 1024 * 1024) as usize;
         let vbuf = match &self.vbo {
             Some(b) if b.size() >= needed as u64 => b.clone(),
             _ => {
-                // Grow (or init) the pool. Round up to a chunk to avoid thrashing.
-                let cap = (needed.max(1 << 20) * 2).next_multiple_of(1 << 20) as u64;
+                // Grow to the smallest multiple of 1 MiB that covers `needed`, capped to
+                // `max_buf`. If a single frame needs more than `max_buf`, clamp to `max_buf`
+                // and the draw will simply be truncated rather than panic the app.
+                let cap = if needed <= max_buf {
+                    (needed.max(1 << 20) * 2).next_multiple_of(1 << 20)
+                } else {
+                    max_buf
+                }
+                .min(max_buf) as u64;
                 let b = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("voxel-vbo-pool"),
                     size: cap,
@@ -418,6 +615,7 @@ impl GpuScene {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(1, &self.material_bg, &[]);
             pass.set_vertex_buffer(0, vbuf.slice(..));
             pass.draw(0..verts.len() as u32, 0..1);
         }
@@ -728,6 +926,65 @@ mod tests {
                 .expect("render after resize");
         });
     }
+
+    /// Mijlpaal 4 P0 (failing → passing): a flat-shaded grass surface shows exactly one
+    /// green tint; after the texture-array + triplanar pipeline it must show MULTIPLE distinct
+    /// green tints on the same surface (procedural/texture variation). This is the pixel-oracle
+    /// that proves the renderer actually samples a material texture instead of a flat tint.
+    #[test]
+    fn grass_surface_shows_texture_variation_not_flat_tint() {
+        futures::executor::block_on(async {
+            let mut scene = GpuScene::new_offscreen(128, 128).await.expect("gpu scene");
+            // A single flat grass quad at world y=0 (4x4 m), material GRASS (id 2).
+            // Winding is CCW as seen from +Y (matches greedy_mesh / S-11), so the
+            // top face is front-facing for the back-face cull.
+            let tris = vec![
+                voxel_mesher::Triangle {
+                    a: voxel_mesher::Vec3::new(0.0, 0.0, 0.0),
+                    b: voxel_mesher::Vec3::new(0.0, 0.0, 4.0),
+                    c: voxel_mesher::Vec3::new(4.0, 0.0, 4.0),
+                    normal: voxel_mesher::Vec3::new(0.0, 1.0, 0.0),
+                    material: voxel_core::palette::MaterialId::from(2u8),
+                },
+                voxel_mesher::Triangle {
+                    a: voxel_mesher::Vec3::new(0.0, 0.0, 0.0),
+                    b: voxel_mesher::Vec3::new(4.0, 0.0, 4.0),
+                    c: voxel_mesher::Vec3::new(4.0, 0.0, 0.0),
+                    normal: voxel_mesher::Vec3::new(0.0, 1.0, 0.0),
+                    material: voxel_core::palette::MaterialId::from(2u8),
+                },
+            ];
+            // Camera at the proven live-client angle (yaw=-pi/2 looks down -Z), placed
+            // above and in front of the quad so the grass top face is clearly in view.
+            let cam = GpuCamera::new(
+                [2.0, 6.0, 6.0],
+                -std::f32::consts::FRAC_PI_2,
+                -0.5,
+                1.0,
+            );
+            let path = std::env::temp_dir().join("m4_grass_p0.png");
+            scene
+                .render_triangles_png(&tris, &cam, path.to_str().unwrap())
+                .await
+                .expect("png render");
+            // Count distinct green tints on the grass surface (ignore near-black background).
+            let img = image::open(&path).expect("open png").to_rgb8();
+            let mut greens: std::collections::HashSet<(u8, u8, u8)> = std::collections::HashSet::new();
+            for p in img.pixels() {
+                let [r, g, b] = [p[0], p[1], p[2]];
+                // grass-green mask: green dominant, not background (dark), not white.
+                if g > 60 && g > r && g > b && !(r < 20 && g < 20 && b < 20) {
+                    // quantize to 8-step bins so lighting noise isn't mistaken for texture
+                    greens.insert((r / 16, g / 16, b / 16));
+                }
+            }
+            assert!(
+                greens.len() > 1,
+                "grass surface showed only {} distinct green tint(s) — flat shading, no texture",
+                greens.len()
+            );
+        });
+    }
 }
 
 const VOXEL_WGSL: &str = r#"
@@ -738,6 +995,16 @@ struct CameraUniform {
     eye_pos: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cam: CameraUniform;
+
+// Mijlpaal 4 P0: per-material PBR params, indexed by the flat material id.
+struct MaterialPbr {
+    albedo_tint: vec4<f32>, // rgb tint, a unused
+    params: vec4<f32>,      // x=tiling, y=normal_scale, z=roughness, w=metallic
+    emissive: vec4<f32>,    // rgb emissive
+};
+@group(1) @binding(0) var<storage, read> materials: array<MaterialPbr>;
+@group(1) @binding(1) var albedo_array: texture_2d_array<f32>;
+@group(1) @binding(2) var mat_sampler: sampler;
 
 struct VtxIn {
     @location(0) pos: vec3<f32>,
@@ -761,29 +1028,34 @@ fn vs_main(in: VtxIn) -> VtxOut {
     return o;
 }
 
+// Triplanar weights from the world normal (no UVs needed -> no stretch on greedy quads).
+fn triplanar_weights(n: vec3<f32>) -> vec3<f32> {
+    let w = pow(abs(n), vec3<f32>(4.0, 4.0, 4.0));
+    let s = w.x + w.y + w.z;
+    return w / max(s, 1e-4);
+}
+
+fn sample_albedo(id: u32, p: vec3<f32>, n: vec3<f32>, tiling: f32) -> vec3<f32> {
+    let uvw = p * tiling;
+    let w = triplanar_weights(n);
+    let cx = textureSample(albedo_array, mat_sampler, uvw.yz, id).rgb * w.x;
+    let cy = textureSample(albedo_array, mat_sampler, uvw.xz, id).rgb * w.y;
+    let cz = textureSample(albedo_array, mat_sampler, uvw.xy, id).rgb * w.z;
+    return cx + cy + cz;
+}
+
 @fragment
 fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
-    let base = mat_tint(in.material);
-    let L = normalize(vec3<f32>(0.4, 0.9, 0.3));
+    let m = materials[in.material];
     let n = normalize(in.normal);
+    let albedo = sample_albedo(in.material, in.world_pos, n, m.params.x) * m.albedo_tint.rgb;
+    let L = normalize(vec3<f32>(0.4, 0.9, 0.3));
     let diff = max(dot(n, L), 0.0);
     let ambient = 0.45;
-    var col = base * (ambient + 0.75 * diff);
-    col = mix(col, col * vec3<f32>(1.05, 0.98, 0.90), 0.3);
+    var col = albedo * (ambient + 0.75 * diff) + m.emissive.rgb;
     let dist = length(in.world_pos - cam.eye_pos.xyz);
     let fog = 1.0 - exp(-cam.params.x * dist);
     col = mix(col, cam.fog_color.xyz, clamp(fog, 0.0, 0.85));
     return vec4<f32>(col, 1.0);
-}
-
-fn mat_tint(id: u32) -> vec3<f32> {
-    if (id == 1u) { return vec3<f32>(0.52, 0.36, 0.22); }
-    if (id == 2u) { return vec3<f32>(0.42, 0.62, 0.28); }
-    if (id == 3u) { return vec3<f32>(0.50, 0.50, 0.52); }
-    if (id == 4u) { return vec3<f32>(0.78, 0.80, 0.85); }
-    if (id == 5u) { return vec3<f32>(0.45, 0.30, 0.18); }
-    if (id == 6u) { return vec3<f32>(0.30, 0.55, 0.25); }
-    if (id == 7u) { return vec3<f32>(0.85, 0.78, 0.55); }
-    return vec3<f32>(0.6, 0.6, 0.65);
 }
 "#;

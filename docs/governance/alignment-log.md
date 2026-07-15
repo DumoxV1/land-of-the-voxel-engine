@@ -2,6 +2,18 @@
 
 Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastgelegd.
 
+## 2026-07-15 — Mijlpaal 4 P0: 4K-texture-system (texture-array + triplanar + PBR)
+
+- P0 GEDAAN: `GpuScene` krijgt `MaterialPbr`-storage-buffer + `texture_2d_array` albedo +
+  anisotropic sampler (clamp 16). WGSL doet triplanar-sample langs wereld X/Y/Z.
+- Strikte TDD: failing test `grass_surface_shows_texture_variation_not_flat_tint` bewees
+  dat een gras-oppervlak nu >1 groentint toont (textuur) i.p.v. één vlakke tint.
+- Bijkomende bug: VBO-pool groeide voorbij `max_buffer_size` (256 MB) bij grote view-radius
+  → client-panic. Gepakt op device-limiet met veilige growth-steps.
+- Geverifieerd: live client capture 3072 unieke kleuren (was 434), gras/steen met textuur.
+  Benchmark 1 km² p50=0.24ms, avg_fps≈3636 — geen FPS-daling t.o.v. pre-texture 3753.
+  Workspace 36 test-binaires groen.
+
 ## 2026-07-15 — audit: wit scherm was echte bug, tests gaven false positive
 
 - Gebruiker rapporteerde blijvend wit scherm na de "never go white" hotfix.

@@ -11,9 +11,9 @@
   "render_w": 1024,
   "render_h": 768,
   "avg_visible_triangles": 3038,
-  "p50_ms": 0.241,
-  "p95_ms": 0.511,
-  "p99_ms": 0.597,
-  "avg_ms": 0.266,
-  "avg_fps": 3753.23
+  "p50_ms": 0.238,
+  "p95_ms": 0.486,
+  "p99_ms": 0.669,
+  "avg_ms": 0.275,
+  "avg_fps": 3636.31
 }

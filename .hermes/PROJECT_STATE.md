@@ -64,6 +64,16 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       **Bewijs na fix: PrintWindow-capture 0,002% wit, 434 unieke kleuren, lucht+terrain zichtbaar.**
       **65/65 tests groen** (60+5 nieuw). Benchmark herschreven naar echte 12,5 cm-schaal:
       1 km² = 250×250 = 62.500 chunks, avg_fps≈3750 (RTX 4080). Volgende: Mijlpaal 4 (4K-textures).
+27b. ✅ Mijlpaal 4 — P0 (2026-07-15): **4K-texture-system (texture-array + triplanar + PBR)**.
+      `GpuScene` krijgt `MaterialPbr`-storage-buffer + albedo `texture_2d_array` + anisotropic
+      sampler (clamp 16); WGSL doet triplanar-sample langs wereld X/Y/Z. Strikte TDD: failing test
+      `grass_surface_shows_texture_variation_not_flat_tint` bewijst >1 groentint op één vlak
+      oppervlak (textuur) i.p.v. flat tint. Bijkomende bug gefixt: VBO-pool groeide voorbij
+      `max_buffer_size` (256 MB) bij grote view-radius → client-panic; nu gekapt op device-limiet.
+      **Geverifieerd:** live capture 3072 unieke kleuren (was 434), gras/steen met zichtbare
+      textuur. Benchmark 1 km² p50=0,24ms, avg_fps≈3636 — géén FPS-daling t.o.v. pre-texture 3753.
+      Workspace 36 test-binaires groen. Volgende: P1 (BCn+mipmaps), P2 (echte 2K/4K textures),
+      P3 (specular/normal).
 
 ## Auditwaarschuwing
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.

@@ -150,7 +150,21 @@ Bevy/wgpu (ADR-0004, status Proposed).
       één cascaded shadow map voor de zon. Voxel-GI/raytracing uitstellen tot dit staat.
 - [ ] Meshing-verbetering: smooth/beveled voxels optie naast blocky (visuele lat dichter
       bij *Lay of the Land*).
-- [ ] Edit-tool live in de GPU-client (place/remove met muis).
+
+### Fase 3a — Mijlpaal 4: 4K-texture-system (texture-array + triplanar + PBR)
+- [x] **P0 GEDAAN (2026-07-15):** `GpuScene` krijgt `MaterialPbr`-storage-buffer + albedo
+      `texture_2d_array` + anisotropic sampler (clamp 16). WGSL: triplanar-sample langs wereld
+      X/Y/Z, PBR (tint × albedo, Lambert + ambient + fog). Strikte TDD: failing test
+      `grass_surface_shows_texture_variation_not_flat_tint` bewijst >1 groentint op één vlak
+      oppervlak (textuur) i.p.v. flat tint. Live capture: 3072 unieke kleuren (was 434).
+      Benchmark 1 km² p50=0,24ms, avg_fps≈3636 — géén FPS-daling t.o.v. pre-texture 3753.
+      Bijkomende bug gefixt: VBO-pool groeide voorbij `max_buffer_size` (256 MB) bij grote
+      view-radius → client-panic; nu gekapt op device-limiet. Zie `docs/milestone4-texture-system.md`.
+- [ ] **P1:** BCn-compressie + mipmaps (`Bc7RgbaUnormSrgb` albedo, `Bc5Unorm` normal, `Bc4Unorm` ORM).
+- [ ] **P2:** echte 2K/4K albedo/normal/ORM PNG's per biome (i.p.v. 16×16 procedural tiles).
+- [ ] **P3:** specular/roughness + schaduw/normal-mapping nuance.
+
+- [ ] Spelercontroller koppelen aan de GPU-camera (first-person/third-person).
 
 ### Fase 4 — Multiplayer (netwerk/protocol)
 - [ ] Netwerklaag bovenop de headless `voxel-server` (advies #7): snapshot-interpolatie voor
