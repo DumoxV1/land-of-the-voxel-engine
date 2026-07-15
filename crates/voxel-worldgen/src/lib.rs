@@ -5,6 +5,7 @@
 //! Renderer-agnostic: depends only on `voxel-core`.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use voxel_core::chunk::Chunk;
@@ -94,6 +95,72 @@ fn build_column_height_buffer(origin_x: i64, origin_z: i64, seed: u32) -> Vec<f3
         }
     }
     hbuf
+}
+
+/// Max distinct column cy-ranges cached per thread. A range is a tiny `(i64, i64)`, so a
+/// generous cap covers every column a long streaming session visits while costing little RAM
+/// (~256k · ~40 B ≈ 10 MB worst case). Cleared wholesale on overflow (cheap, extremely rare).
+const COLUMN_RANGE_CACHE_CAP: usize = 262_144;
+
+thread_local! {
+    /// Per-thread cache of a column's solid chunk-Y range, keyed by (cx, cz, seed).
+    /// `column_solid_cy_range` is a pure function, so caching makes the per-frame streaming
+    /// lookup O(1) after a column is first seen.
+    static COLUMN_RANGE_CACHE: RefCell<HashMap<(i64, i64, u32), (i64, i64)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Inclusive chunk-Y range `[lo, hi]` of the chunks in column (cx, cz) that can contain any
+/// solid voxel under `seed`. Any chunk `(cx, cy, cz)` with `cy < lo` or `cy > hi` is
+/// **guaranteed** all-AIR — `generate_chunk` returns a uniform-AIR chunk for it via the exact
+/// same surface/bedrock envelope. This lets the client's streaming loop skip the tall band of
+/// empty sky chunks above the surface and the deep chunks below the bedrock floor *exactly*:
+/// the visible set is byte-identical (no chunk carrying geometry is ever excluded), only the
+/// wasted per-air-chunk work (frustum test + cache probe + generate call) is avoided.
+///
+/// Pure + deterministic (function of cx, cz, seed); cached per thread. Mirrors the envelope
+/// `generate_chunk` derives from `max_h` (max surface over the 32² footprint) and `min_floor`
+/// (min `max(h - BEDROCK_DEPTH, 0)`): a chunk overlaps solid iff
+/// `cy*SIZE <= max_h && cy*SIZE + SIZE-1 >= min_floor`.
+pub fn column_solid_cy_range(cx: i64, cz: i64, seed: u32) -> (i64, i64) {
+    let key = (cx, cz, seed);
+    if let Some(hit) = COLUMN_RANGE_CACHE.with(|c| c.borrow().get(&key).copied()) {
+        return hit;
+    }
+    let origin_x = cx * SIZE;
+    let origin_z = cz * SIZE;
+    let mut max_h = i64::MIN;
+    let mut min_floor = i64::MAX;
+    // Sample the exact 32² interior footprint `generate_chunk`'s envelope uses — no border
+    // ring (the ring only feeds slope, not the air/solid decision).
+    for lx in 0..SIZE {
+        for lz in 0..SIZE {
+            let h = (surface_height_m(origin_x + lx, origin_z + lz, seed)
+                / voxel_core::coords::VOXEL_SIZE_M) as i64;
+            if h > max_h {
+                max_h = h;
+            }
+            let floor = (h - BEDROCK_DEPTH).max(0);
+            if floor < min_floor {
+                min_floor = floor;
+            }
+        }
+    }
+    // `hi` = highest cy whose bottom voxel (cy*SIZE) still sits at/under the tallest surface.
+    let hi = max_h.div_euclid(SIZE);
+    // `lo` = lowest cy whose top voxel (cy*SIZE + SIZE-1) still reaches the lowest bedrock
+    // floor. Floor-division is conservative (may include one extra all-AIR chunk below, never
+    // one too few), so a solid chunk is never excluded.
+    let lo = (min_floor - (SIZE - 1)).div_euclid(SIZE);
+    let range = (lo, hi);
+    COLUMN_RANGE_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= COLUMN_RANGE_CACHE_CAP {
+            c.clear();
+        }
+        c.insert(key, range);
+    });
+    range
 }
 
 /// Generate a deterministic chunk for the given coord + seed.
@@ -768,6 +835,62 @@ mod tests {
             }
         }
         assert!(differs, "different seeds must not collide in the column cache");
+    }
+
+    /// Streaming range (2026-07-15, FASE A #3): `column_solid_cy_range` must NEVER exclude a
+    /// chunk that actually contains solid voxels — doing so would leave a hole / white gap in
+    /// the streamed world (the exact class of bug the client fought repeatedly). For a spread
+    /// of columns (incl. negative coords) we scan a wide Y-span and assert every chunk with any
+    /// solid voxel falls INSIDE the reported `[lo, hi]`, and that `hi` (the surface chunk)
+    /// carries terrain so the bound is tight, not grossly over-wide. RED until the fn exists.
+    #[test]
+    fn column_range_never_excludes_solid_chunks() {
+        let seed = 7u32;
+        for &(cx, cz) in &[
+            (0, 0),
+            (3, 5),
+            (40, 40),
+            (120, 80),
+            (200, 200),
+            (-5, 3),
+            (2, -4),
+            (300, 50),
+        ] {
+            let (lo, hi) = column_solid_cy_range(cx, cz, seed);
+            assert!(lo <= hi, "column ({cx},{cz}) has empty range {lo}..={hi}");
+            for cy in -2..=45i64 {
+                let chunk = generate_chunk(ChunkCoord::new(cx, cy, cz), seed);
+                if chunk_has_any_solid(&chunk) {
+                    assert!(
+                        cy >= lo && cy <= hi,
+                        "column ({cx},{cz}) range {lo}..={hi} EXCLUDES solid chunk cy={cy} \
+                         — streaming would leave a hole"
+                    );
+                }
+            }
+            // Tightness: the top chunk of the range must be the surface shell (contains terrain).
+            assert!(
+                chunk_has_any_solid(&generate_chunk(ChunkCoord::new(cx, hi, cz), seed)),
+                "column ({cx},{cz}) hi={hi} should be the surface chunk and carry terrain"
+            );
+        }
+    }
+
+    /// The range is a pure function (cx, cz, seed) and must stay deterministic across the
+    /// per-thread cache — including churn from many other columns and a different seed reusing
+    /// the same (cx,cz). RED until the fn exists.
+    #[test]
+    fn column_range_is_deterministic_and_cache_safe() {
+        let seed = 7u32;
+        let r1 = column_solid_cy_range(12_345, 67_890, seed);
+        for k in 0..200i64 {
+            let _ = column_solid_cy_range(k, k * 2, seed);
+        }
+        let _ = column_solid_cy_range(12_345, 67_890, 42); // different seed, same column
+        let r2 = column_solid_cy_range(12_345, 67_890, seed);
+        assert_eq!(r1, r2, "column range must be deterministic across cache churn");
+        let (lo, hi) = column_solid_cy_range(12_345, 67_890, 42);
+        assert!(lo <= hi, "different-seed range must still be valid");
     }
 
     /// Helper: does a chunk contain any non-air voxel?

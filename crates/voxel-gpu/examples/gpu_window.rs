@@ -14,7 +14,7 @@ use winit::window::{Window, WindowAttributes};
 
 use voxel_core::coords::{ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M};
 use voxel_gpu::renderer::{GpuCamera, GpuScene};
-use voxel_gpu::{mesh_chunk_world_meters, mesh_pool, MeshResult};
+use voxel_gpu::{mesh_chunk_world_meters, MeshResult};
 use voxel_mesher::Triangle;
 use voxel_player::{Input, Player, PlayerController};
 use voxel_world::World;
@@ -120,6 +120,13 @@ const VBO_BYTES_CAP: usize = 256 * 1024 * 1024;
 const UPLOAD_BUDGET: usize = 64; // chunks uploaded/frame; raised from 4 after the
                                  // vertical-scale spike multiplied the streamed set
 
+/// Number of background mesh workers. Kept just below core count so the render thread
+/// keeps a responsive time slice (state-of-the-art back-pressure: a bounded job channel,
+/// not an unbounded rayon spawn storm).
+fn num_mesh_workers() -> usize {
+    num_cpus::get().saturating_sub(1).max(2)
+}
+
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
@@ -128,10 +135,17 @@ struct App {
     seed: u32,
     mesh_cache: voxel_gpu::cache::LruMeshCache,
     frame: u64,
-    mesh_pool: rayon::ThreadPool,
+    // Bounded worker pool: jobs pushed onto `job_tx` (capacity = workers*2), N worker
+    // threads `recv()` and stream results back via `mesh_tx`. The render thread can never
+    // outrun the workers (real back-pressure vs the old unbounded rayon spawn).
+    job_tx: Option<crossbeam_channel::Sender<voxel_gpu::chunk_stream::ChunkJob>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
     mesh_tx: crossbeam_channel::Sender<MeshResult>,
     mesh_rx: crossbeam_channel::Receiver<MeshResult>,
     requests: RequestTracker,
+    // Streaming scheduler: close→far priority, LOD rings, air-skip.
+    scheduler: voxel_gpu::chunk_stream::ChunkScheduler,
+    heights: voxel_gpu::chunk_stream::HeightCache,
     camera: GpuCamera,
     /// First-person avatar (1.90 m) that walks the terrain with voxel collision.
     player: Player,
@@ -160,6 +174,31 @@ impl Default for App {
     fn default() -> Self {
         let seed = 7u32;
         let (mesh_tx, mesh_rx) = crossbeam_channel::unbounded::<MeshResult>();
+        let n = num_mesh_workers();
+        // Bounded job channel: capacity = workers*2 gives real back-pressure. Workers block
+        // on recv(); the render thread's `try_send` simply drops the job (re-issued next
+        // frame) once the channel is full, instead of spawning unbounded work.
+        let (job_tx, job_rx) = crossbeam_channel::bounded::<voxel_gpu::chunk_stream::ChunkJob>(n * 2);
+        let workers = (0..n)
+            .map(|_| {
+                let rx = job_rx.clone();
+                let tx = mesh_tx.clone();
+                std::thread::spawn(move || {
+                    while let Ok(job) = rx.recv() {
+                        let chunk = voxel_worldgen::generate_chunk(job.coord, seed);
+                        let tris = mesh_chunk_world_meters(&chunk, job.lod);
+                        let _ = tx.send(MeshResult {
+                            coord: job.coord,
+                            gen: 0, // scheduler uses its own `seen` guard; gen is cosmetic here
+                            tris,
+                        });
+                    }
+                })
+            })
+            .collect();
+        // The original job_rx is dropped so only the worker clones keep it alive; when all
+        // workers exit the channel closes (handled by the while-let above).
+        drop(job_rx);
         Self {
             window: None,
             surface: None,
@@ -169,10 +208,21 @@ impl Default for App {
             // LRU mesh cache: cap 200k chunks (~RAM-light) or 12 GB estimated, whichever first.
             mesh_cache: voxel_gpu::cache::LruMeshCache::new(200_000, 12 * 1024 * 1024 * 1024),
             frame: 0,
-            mesh_pool: mesh_pool(),
+            job_tx: Some(job_tx),
+            workers,
             mesh_tx,
             mesh_rx,
             requests: RequestTracker::default(),
+            scheduler: voxel_gpu::chunk_stream::ChunkScheduler::new(
+                voxel_gpu::chunk_stream::StreamConfig {
+                    view_radius: VIEW_RADIUS as i64,
+                    max_y: 12,
+                    requests_per_frame: 4,
+                    lod_half_radius: 8,
+                    air_margin: 1,
+                },
+            ),
+            heights: voxel_gpu::chunk_stream::HeightCache::new(2048),
             // First-person spawn: place the 1.90 m avatar's feet on the terrain surface at
             // the origin; camera eye is derived from the player each frame in update_camera.
             // NB: the initial eye MUST match the spawn position, not a placeholder — otherwise
@@ -534,9 +584,11 @@ impl App {
             return;
         };
 
-        // --- (P3) Drain finished meshes from the worker channel (bounded per-frame budget,
-        //     stale results dropped via generation counter). Non-blocking: the render thread
-        //     never generates/meshes a chunk itself.
+        // --- (P3) Drain finished meshes from the worker channel (bounded per-frame budget).
+        //     Non-blocking: the render thread never generates/meshes a chunk itself. The
+        //     scheduler's `seen` guard (set when a job is planned, checked by the `ready`
+        //     closure against the cache) prevents re-requesting an already-cached chunk, so
+        //     no generation-counter stale-check is needed here.
         let mut budget = UPLOAD_BUDGET;
         while budget > 0 {
             let r = match self.mesh_rx.try_recv() {
@@ -544,12 +596,7 @@ impl App {
                 Err(_) => break,
             };
             budget -= 1;
-            // Discard if a newer request superseded this one (camera moved away/back).
-            if self.requests.gen(&r.coord) != Some(r.gen) {
-                continue;
-            }
             self.mesh_cache.insert(r.coord, r.tris, self.frame);
-            self.requests.complete(&r.coord);
         }
 
         // --- Chunk-streaming: draw visible chunks; request missing ones off-thread. ---
@@ -562,30 +609,62 @@ impl App {
         let half_y = 24.0; // terrain peaks ~40 m; pad for height + camera clearance
         const MAX_Y: i64 = 12; // hard cap on streamed vertical chunks (~48 m)
         let frustum = voxel_gpu::renderer::Frustum::from_view_proj(&self.camera.view_proj());
+        let _cam_slab = ((ex / VOXEL_SIZE_M / CHUNK_M as f32) as i64).clamp(0, MAX_Y);
+
+        // --- Pass A: request streamed chunks (close→far priority, LOD rings, air-skip). ---
+        // The scheduler plans at most `requests_per_frame` jobs this frame, closest first.
+        // We then frustum-cull EACH job BEFORE handing it to the bounded worker pool, so we
+        // never generate/mesh a chunk the camera can't see (the old loop only frustum-culled
+        // at draw time, still paying for chunks behind the player).
+        let jobs = self.scheduler.plan(
+            ccx,
+            ccz,
+            _cam_slab,
+            &mut self.heights,
+            self.seed,
+            |c| self.mesh_cache.get(c).is_some(),
+        );
+        if let Some(tx) = &self.job_tx {
+            for job in jobs {
+                // Frustum cull the chunk center (full chunk AABB) before queueing work.
+                let center = [
+                    (job.coord.x as f32 + 0.5) * CHUNK_M,
+                    (job.coord.y as f32 * CHUNK_M) + half_y * 0.5,
+                    (job.coord.z as f32 + 0.5) * CHUNK_M,
+                ];
+                if !frustum.intersects_aabb(center, half.max(half_y)) {
+                    // Not visible this frame: drop the reservation so it can be re-planned
+                    // (and re-frustum-tested) when the camera turns toward it.
+                    self.scheduler.forget(&job.coord);
+                    continue;
+                }
+                // Bounded channel: if the workers are saturated, drop the job (re-issued next
+                // frame). This is the real back-pressure that keeps the CPU responsive.
+                let _ = tx.try_send(job);
+            }
+        }
+
+        // --- Pass B: draw every cached chunk inside the view disc that is in-frustum. ---
         let r2 = VIEW_RADIUS * VIEW_RADIUS;
         for dx in -VIEW_RADIUS..=VIEW_RADIUS {
             for dz in -VIEW_RADIUS..=VIEW_RADIUS {
-                // Radial cull: only stream the disc (dx^2+dz^2 <= R^2), not the square —
-                // ~22% fewer columns at the same nominal view radius.
                 if dx * dx + dz * dz > r2 {
-                    continue;
+                    continue; // radial disc, not square
                 }
                 let cx = ccx + dx;
                 let cz = ccz + dz;
-                // Only stream Y-slabs that can contain terrain: a column's surface height
-                // bounds how high a solid voxel can appear. This avoids generating/meshing
-                // the ~11 empty slabs above the ~26 m peaks (vertical-scale spike made the
-                // raw 0..=MAX_Y sweep 13x the old chunk count -> multi-minute first load).
-                let col_wx = (cx * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
-                let col_wz = (cz * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
-                let col_top_vox = (voxel_worldgen::surface_height_m(col_wx, col_wz, self.seed) / voxel_core::coords::VOXEL_SIZE_M) as i64;
-                let max_cy = ((col_top_vox + voxel_core::coords::CHUNK_SIZE as i64) / voxel_core::coords::CHUNK_SIZE as i64).min(MAX_Y);
-                // NOTE: negative chunk coords are valid (ChunkCoord is i64 + Euclidean div).
-                // Do NOT skip them — skipping caused the "white screen when flying into
-                // negative space" bug.
-                for cy in 0..=max_cy {
-                    // Frustum cull: skip chunks fully outside the camera view. Center Y = middle
-                    // of this vertical chunk slab.
+                // Exact vertical band that can hold geometry (footprint-max surface down to
+                // the bedrock floor). Skips the deep all-AIR slabs below; the scheduler's
+                // air-skip already bounds the requested set, this just avoids drawing empties.
+                let (lo_cy, hi_cy) = voxel_worldgen::column_solid_cy_range(cx, cz, self.seed);
+                let lo_cy = lo_cy.max(0);
+                let hi_cy = hi_cy.min(MAX_Y);
+                for cy in lo_cy..=hi_cy {
+                    let coord = ChunkCoord::new(cx, cy, cz);
+                    let Some(m) = self.mesh_cache.get(&coord) else {
+                        continue; // not ready yet this frame; pops in once the worker replies
+                    };
+                    // Frustum cull at draw time too (cheap, avoids binding off-screen chunks).
                     let center = [
                         (cx as f32 + 0.5) * CHUNK_M,
                         (cy as f32 * CHUNK_M) + half_y * 0.5,
@@ -594,37 +673,12 @@ impl App {
                     if !frustum.intersects_aabb(center, half.max(half_y)) {
                         continue;
                     }
-                    let coord = ChunkCoord::new(cx, cy, cz);
-                    if let Some(m) = self.mesh_cache.get(&coord) {
-                        // Borrow directly — extend_from_slice already copies; the prior
-                        // `.clone()` was a pure waste (52 B/tri of alloc + memcpy per chunk).
-                        tris.extend_from_slice(&m.tris);
-                        vbo_bytes += m.tris.len() * std::mem::size_of::<voxel_mesher::Triangle>();
-                        // Mark recently visible (separate mutable borrow, after the immutable read).
-                        self.mesh_cache.touch(&coord, self.frame);
-                    } else if !self.requests.is_pending(&coord) {
-                        // VBO budget gate: don't request more chunks once we've filled the
-                        // 256 MB cap — the rest pop in later as the camera moves / far
-                        // chunks evict. Keeps first load fast post vertical-scale spike.
-                        if vbo_bytes >= VBO_BYTES_CAP {
-                            continue;
-                        }
-                        vbo_bytes += 32 * 32 * 32 / 2 * std::mem::size_of::<voxel_mesher::Triangle>();
-                    // Not ready and not yet requested: spawn off-thread generate+mesh.
-                    let gen = self.requests.request(coord);
-                    let tx = self.mesh_tx.clone();
-                    let seed = self.seed;
-                    self.mesh_pool.spawn(move || {
-                        // CPU-only: pure worldgen + meshing, never touches the GPU.
-                        let chunk = voxel_worldgen::generate_chunk(coord, seed);
-                        let tris = mesh_chunk_world_meters(&chunk);
-                        let _ = tx.send(MeshResult { coord, gen, tris });
-                    });
+                    tris.extend_from_slice(&m.tris);
+                    vbo_bytes += m.tris.len() * std::mem::size_of::<voxel_mesher::Triangle>();
+                    self.mesh_cache.touch(&coord, self.frame);
                 }
-                // else: pending, not ready yet -> skipped this frame, pops in later.
-                } // cy
-            } // dz
-        } // dx
+            }
+        }
 
         // Frame-1 fallback only: seed the chunk directly under the camera (the surface
         // chunk for the spawn column) so the very first frame already shows terrain
@@ -645,7 +699,7 @@ impl App {
                 }
                 let coord = ChunkCoord::new(ccx, cy_seed, ccz);
                 let chunk = self.world.get_or_generate(coord);
-                let mesh = mesh_chunk_world_meters(&chunk);
+                let mesh = mesh_chunk_world_meters(&chunk, voxel_gpu::chunk_stream::Lod::Full);
                 self.mesh_cache.insert(coord, mesh.clone(), self.frame);
                 tris.extend_from_slice(&mesh);
             }

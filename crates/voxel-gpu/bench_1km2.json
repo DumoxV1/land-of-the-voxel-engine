@@ -7,13 +7,13 @@
   "world_area_m2": 1000000,
   "world_area_km2": 1.0000,
   "view_radius_chunks": 48,
-  "frames": 200,
+  "frames": 120,
   "render_w": 1024,
   "render_h": 768,
-  "avg_visible_triangles": 243114,
-  "p50_ms": 7.318,
-  "p95_ms": 14.660,
-  "p99_ms": 16.835,
-  "avg_ms": 7.999,
-  "avg_fps": 125.01
+  "avg_visible_triangles": 210570,
+  "p50_ms": 11.166,
+  "p95_ms": 19.908,
+  "p99_ms": 36.265,
+  "avg_ms": 11.984,
+  "avg_fps": 83.45
 }

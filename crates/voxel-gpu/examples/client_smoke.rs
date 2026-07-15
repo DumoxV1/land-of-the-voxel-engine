@@ -61,11 +61,16 @@ fn main() {
                 for dz in -VIEW_RADIUS..=VIEW_RADIUS {
                     let cx = ccx + dx;
                     let cz = ccz + dz;
-                    for cy in 0..=MAX_CY {
+                    // Same per-column solid-Y band the live client now uses
+                    // (voxel-worldgen::column_solid_cy_range): skips all-AIR sky /
+                    // below-bedrock chunks exactly, keeping this smoke test faithful to the
+                    // real streaming path. Must still render every frame (no white gaps).
+                    let (lo_cy, hi_cy) = voxel_worldgen::column_solid_cy_range(cx, cz, SEED);
+                    for cy in lo_cy.max(0)..=hi_cy.min(MAX_CY) {
                         let coord = ChunkCoord::new(cx, cy, cz);
                         let entry = cache.entry(coord).or_insert_with(|| {
                             let c = voxel_worldgen::generate_chunk(coord, SEED);
-                            mesh_chunk_world_meters(&c)
+                            mesh_chunk_world_meters(&c, voxel_gpu::chunk_stream::Lod::Full)
                         });
                         tris.extend_from_slice(entry);
                     }

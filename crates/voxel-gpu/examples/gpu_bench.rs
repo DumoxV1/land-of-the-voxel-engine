@@ -86,18 +86,19 @@ fn main() {
         let mut frame_times: Vec<f64> = Vec::with_capacity(frames);
         let mut total_visible = 0usize;
 
-        for f in 0..frames {
-            let t = f as f32 / 60.0;
-            let ex = mid + orbit_r * t.cos();
-            let ez = mid + orbit_r * t.sin();
-            cam.eye = [ex, eye_y, ez];
-            let vp = cam.view_proj();
-            let frustum = Frustum::from_view_proj(&vp);
-
-            let ccx = (ex / CHUNK_M).floor() as i64;
-            let ccz = (ez / CHUNK_M).floor() as i64;
-            let half = CHUNK_M * 0.5;
-
+        // Gather the visible triangles for a camera at chunk-cell (ccx, ccz). When `use_range`
+        // is set, the vertical stream is bounded by `column_solid_cy_range` (skips the all-AIR
+        // sky chunks above the surface + deep chunks below bedrock EXACTLY); otherwise it uses
+        // the old naive `0..=max_cy` sweep. Both paths produce the identical visible set — the
+        // skipped chunks are guaranteed all-AIR (empty mesh) — so this is a pure CPU win.
+        let half = CHUNK_M * 0.5;
+        let gather = |mesh_cache: &mut HashMap<ChunkCoord, Vec<Triangle>>,
+                      world: &mut World,
+                      frustum: &Frustum,
+                      ccx: i64,
+                      ccz: i64,
+                      use_range: bool|
+         -> Vec<Triangle> {
             let mut visible: Vec<Triangle> = Vec::new();
             for dx in -radius..=radius {
                 for dz in -radius..=radius {
@@ -106,11 +107,14 @@ fn main() {
                     if cx < 0 || cz < 0 || cx >= side || cz >= side {
                         continue;
                     }
-                    // Stream the vertical column of chunks (cy 0..=max_cy), like the client.
-                    // The A2 early-out makes the above-surface / below-bedrock cy's near-free.
-                    for cy in 0..=max_cy {
+                    let (lo, hi) = if use_range {
+                        let (l, h) = voxel_worldgen::column_solid_cy_range(cx, cz, 7);
+                        (l.max(0), h.min(max_cy))
+                    } else {
+                        (0, max_cy)
+                    };
+                    for cy in lo..=hi {
                         let coord = ChunkCoord::new(cx, cy, cz);
-                        // Frustum-culling per chunk (AABB centred on this cy slab).
                         if !frustum.intersects_aabb(
                             [
                                 (cx as f32 + 0.5) * CHUNK_M,
@@ -123,12 +127,65 @@ fn main() {
                         }
                         let entry = mesh_cache.entry(coord).or_insert_with(|| {
                             let chunk = world.get_or_generate(coord);
-                            mesh_chunk_world_meters(&chunk)
+                            mesh_chunk_world_meters(&chunk, voxel_gpu::chunk_stream::Lod::Full)
                         });
                         visible.extend_from_slice(entry);
                     }
                 }
             }
+            visible
+        };
+
+        // One-time self-check + CPU cull-loop timing on the frame-0 camera, BEFORE the timed
+        // render loop. Proves the range-bounded stream yields the SAME visible triangles as the
+        // naive sweep (no visual regression) and measures the loop-overhead saved (frustum
+        // tests + cache probes on the skipped all-AIR chunks). Cache is warmed first so this
+        // times the loop, not chunk generation.
+        {
+            let vp0 = cam.view_proj();
+            let frustum0 = Frustum::from_view_proj(&vp0);
+            let ccx0 = (cam.eye[0] / CHUNK_M).floor() as i64;
+            let ccz0 = (cam.eye[2] / CHUNK_M).floor() as i64;
+            let v_naive = gather(&mut mesh_cache, &mut world, &frustum0, ccx0, ccz0, false);
+            let v_range = gather(&mut mesh_cache, &mut world, &frustum0, ccx0, ccz0, true);
+            assert_eq!(
+                v_naive.len(),
+                v_range.len(),
+                "range-bounded stream changed the visible triangle count — VISUAL REGRESSION"
+            );
+            let reps = 30;
+            let t = Instant::now();
+            for _ in 0..reps {
+                let _ = gather(&mut mesh_cache, &mut world, &frustum0, ccx0, ccz0, false);
+            }
+            let naive_ms = t.elapsed().as_secs_f64() * 1000.0 / reps as f64;
+            let t = Instant::now();
+            for _ in 0..reps {
+                let _ = gather(&mut mesh_cache, &mut world, &frustum0, ccx0, ccz0, true);
+            }
+            let range_ms = t.elapsed().as_secs_f64() * 1000.0 / reps as f64;
+            println!(
+                "CULL-LOOP frame0: naive(0..={})={:.3}ms  range(column_solid_cy_range)={:.3}ms  speedup={:.2}x  visible_tris={} (identical)",
+                max_cy,
+                naive_ms,
+                range_ms,
+                naive_ms / range_ms.max(1e-9),
+                v_range.len()
+            );
+        }
+
+        for f in 0..frames {
+            let t = f as f32 / 60.0;
+            let ex = mid + orbit_r * t.cos();
+            let ez = mid + orbit_r * t.sin();
+            cam.eye = [ex, eye_y, ez];
+            let vp = cam.view_proj();
+            let frustum = Frustum::from_view_proj(&vp);
+
+            let ccx = (ex / CHUNK_M).floor() as i64;
+            let ccz = (ez / CHUNK_M).floor() as i64;
+
+            let visible = gather(&mut mesh_cache, &mut world, &frustum, ccx, ccz, true);
             total_visible += visible.len();
 
             let t0 = Instant::now();

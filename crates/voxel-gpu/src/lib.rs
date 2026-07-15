@@ -6,6 +6,7 @@
 pub mod probe;
 pub mod renderer;
 pub mod cache;
+pub mod chunk_stream;
 
 /// Mijlpaal 3 (P3): non-blocking chunk meshing.
 ///
@@ -26,26 +27,37 @@ pub struct MeshResult {
 }
 
 /// Convert a chunk-local mesh (vertices in voxel units) into canonical GPU world meters.
-pub fn mesh_chunk_world_meters(chunk: &Chunk) -> Vec<Triangle> {
+/// `lod` downsamples the chunk before meshing: `Lod::Half` collapses every 2×2×2 voxel
+/// block into a single 2×-scale voxel (distant chunks need far less geometry).
+pub fn mesh_chunk_world_meters(chunk: &Chunk, lod: crate::chunk_stream::Lod) -> Vec<Triangle> {
     // A1 (2026-07-15): an all-AIR chunk (every streamed chunk above the surface or below the
     // bedrock line) meshes to nothing. Skip the full greedy sweep (~196k neighbour probes +
     // 6 mask allocations per chunk) — the render loop discards an empty mesh anyway.
     if chunk.is_empty() {
         return Vec::new();
     }
+    // LOD: downsample to 2x blocks first, then mesh the coarse chunk at 2x world scale.
+    let (mesh_chunk, voxel_scale) = match lod {
+        crate::chunk_stream::Lod::Full => (chunk.clone(), VOXEL_SIZE_M),
+        crate::chunk_stream::Lod::Half => {
+            let half = downsample_chunk_2x(chunk);
+            // Each coarse voxel spans 2 fine voxels = 2 * VOXEL_SIZE_M in world meters.
+            (half, VOXEL_SIZE_M * 2.0)
+        }
+    };
     let origin = [
-        chunk.coord.x as f32 * CHUNK_SIZE as f32,
-        chunk.coord.y as f32 * CHUNK_SIZE as f32,
-        chunk.coord.z as f32 * CHUNK_SIZE as f32,
+        mesh_chunk.coord.x as f32 * CHUNK_SIZE as f32 * (voxel_scale / VOXEL_SIZE_M),
+        mesh_chunk.coord.y as f32 * CHUNK_SIZE as f32 * (voxel_scale / VOXEL_SIZE_M),
+        mesh_chunk.coord.z as f32 * CHUNK_SIZE as f32 * (voxel_scale / VOXEL_SIZE_M),
     ];
     let to_world = |p: Vec3| {
         Vec3::new(
-            (origin[0] + p.x) * VOXEL_SIZE_M,
-            (origin[1] + p.y) * VOXEL_SIZE_M,
-            (origin[2] + p.z) * VOXEL_SIZE_M,
+            (origin[0] + p.x) * voxel_scale,
+            (origin[1] + p.y) * voxel_scale,
+            (origin[2] + p.z) * voxel_scale,
         )
     };
-    voxel_mesher::greedy_mesh(chunk)
+    voxel_mesher::greedy_mesh(&mesh_chunk)
         .into_iter()
         .map(|t| Triangle {
             a: to_world(t.a),
@@ -54,6 +66,42 @@ pub fn mesh_chunk_world_meters(chunk: &Chunk) -> Vec<Triangle> {
             ..t
         })
         .collect()
+}
+
+/// Downsample a CHUNK_SIZE³ chunk into a (CHUNK_SIZE/2)³ chunk where each 2×2×2 voxel
+/// block becomes one coarse voxel. The coarse voxel keeps the **topmost non-AIR** fine
+/// material in the block (the visible surface), or AIR if the whole block is empty. This
+/// preserves the silhouette/surface for distant LOD meshes while cutting volume 8×.
+fn downsample_chunk_2x(chunk: &Chunk) -> Chunk {
+    use voxel_core::coords::{LocalVoxel, CHUNK_SIZE};
+    let half = (CHUNK_SIZE / 2) as i32;
+    let mut out = Chunk::uniform(chunk.coord, voxel_core::palette::MaterialId::from(0u8));
+    for bx in 0..half {
+        for by in 0..half {
+            for bz in 0..half {
+                // Pick the topmost non-AIR voxel in this 2x2x2 block.
+                let mut mat = voxel_core::palette::MaterialId::from(0u8);
+                'blk: for dy in (0..2).rev() {
+                    for dx in 0..2 {
+                        for dz in 0..2 {
+                            let fx = (bx * 2 + dx) as u8;
+                            let fy = (by * 2 + dy) as u8;
+                            let fz = (bz * 2 + dz) as u8;
+                            let m = chunk.get(LocalVoxel::new(fx, fy, fz));
+                            if m != voxel_core::palette::MaterialId::from(0u8) {
+                                mat = m;
+                                break 'blk;
+                            }
+                        }
+                    }
+                }
+                if mat != voxel_core::palette::MaterialId::from(0u8) {
+                    out.set(LocalVoxel::new(bx as u8, by as u8, bz as u8), mat);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Eye height in renderer coordinates (meters) from a terrain height in voxel units.
@@ -110,18 +158,19 @@ pub fn mesh_pool() -> rayon::ThreadPool {
 }
 
 /// Spawn an off-thread generate+mesh for `coord`, sending the result on `tx`.
-/// CPU-only: must never touch the wgpu Device/Queue.
+/// CPU-only: must never touch the wgpu Device/Queue. `lod` downsamples distant chunks.
 pub fn spawn_mesh(
     pool: &rayon::ThreadPool,
     tx: &crossbeam_channel::Sender<MeshResult>,
     coord: ChunkCoord,
     gen: u64,
     seed: u32,
+    lod: crate::chunk_stream::Lod,
 ) {
     let tx = tx.clone();
     pool.spawn(move || {
         let chunk = voxel_worldgen::generate_chunk(coord, seed);
-        let tris = mesh_chunk_world_meters(&chunk);
+        let tris = mesh_chunk_world_meters(&chunk, lod);
         let _ = tx.send(MeshResult { coord, gen, tris });
     });
 }
@@ -149,7 +198,7 @@ mod tests {
         let cy = (col_top_vox / CHUNK_SIZE as i64).clamp(0, 12);
         let coord = ChunkCoord::new(cx, cy, cz);
         let chunk = voxel_worldgen::generate_chunk(coord, seed);
-        let tris = mesh_chunk_world_meters(&chunk);
+        let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full);
         assert!(
             !tris.is_empty(),
             "spawn surface chunk ({cx},{cy},{cz}) must produce triangles for frame-1 render"
@@ -170,7 +219,7 @@ mod tests {
             / voxel_core::coords::VOXEL_SIZE_M) as i64
             / 32;
         let coord = ChunkCoord::new(cx, cy, cz);
-        spawn_mesh(&pool, &tx, coord, 1, 7);
+        spawn_mesh(&pool, &tx, coord, 1, 7, crate::chunk_stream::Lod::Full);
         let r = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("mesh result should arrive off-thread");
@@ -186,7 +235,7 @@ mod tests {
         let pool = mesh_pool();
         let (tx, rx) = crossbeam_channel::unbounded::<MeshResult>();
         let coord = ChunkCoord::new(2, 0, 3);
-        spawn_mesh(&pool, &tx, coord, 1, 7);
+        spawn_mesh(&pool, &tx, coord, 1, 7, crate::chunk_stream::Lod::Full);
         let r = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("mesh must arrive");
@@ -208,6 +257,29 @@ mod tests {
                 p.y
             );
         }
+    }
+
+    #[test]
+    fn lod_half_downsamples_to_double_scale() {
+        // A solid single voxel at local (0,0,0): Full meshes 1 voxel (12 tris) at 0.125 m,
+        // Half meshes 1 coarse voxel (12 tris) but at 0.25 m (2x) world scale. Both must
+        // produce a non-empty mesh; the Half mesh's world extent must be ~2x the Full.
+        use voxel_core::coords::LocalVoxel;
+        use voxel_core::palette::MaterialId;
+        let coord = ChunkCoord::new(5, 0, 5);
+        let mut full_chunk = Chunk::uniform(coord, MaterialId::from(0u8));
+        full_chunk.set(LocalVoxel::new(0, 0, 0), MaterialId::from(2u8));
+        let full = mesh_chunk_world_meters(&full_chunk, crate::chunk_stream::Lod::Full);
+        let half = mesh_chunk_world_meters(&full_chunk, crate::chunk_stream::Lod::Half);
+        assert_eq!(full.len(), 12, "full-res single voxel = 12 tris");
+        assert_eq!(half.len(), 12, "half-res single block = 12 tris (one coarse voxel)");
+        // Half mesh lives at 2x world scale -> its max vertex coordinate is ~2x the Full's.
+        let full_max = full.iter().flat_map(|t| [t.a, t.b, t.c]).map(|v| v.x).fold(0.0f32, f32::max);
+        let half_max = half.iter().flat_map(|t| [t.a, t.b, t.c]).map(|v| v.x).fold(0.0f32, f32::max);
+        assert!(
+            half_max > full_max * 1.5,
+            "half-res mesh must be ~2x larger in world meters (full_max={full_max}, half_max={half_max})"
+        );
     }
 
     /// Movement must be frame-rate independent: the same key held for the same wall-clock
@@ -256,7 +328,7 @@ mod tests {
                 / 32;
             let coord = ChunkCoord::new(cx, cy, cz);
             let chunk = voxel_worldgen::generate_chunk(coord, 7);
-            let tris = mesh_chunk_world_meters(&chunk);
+            let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full);
             assert!(
                 !tris.is_empty(),
                 "negative chunk {cx},{cz} must produce terrain, not be skipped"
@@ -281,7 +353,7 @@ mod tests {
             ChunkCoord::new(cx, cy, cz)
         };
         let gen = 1u64;
-        spawn_mesh(&pool, &tx, coord, gen, 7);
+        spawn_mesh(&pool, &tx, coord, gen, 7, crate::chunk_stream::Lod::Full);
 
         let mut cache: HashMap<ChunkCoord, Vec<Triangle>> = HashMap::new();
         let mut requested_gen: HashMap<ChunkCoord, u64> = HashMap::new();
