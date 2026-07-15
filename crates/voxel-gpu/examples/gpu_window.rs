@@ -41,9 +41,7 @@ fn nearest_visible_chunk(
         for dz in -VIEW_RADIUS..=VIEW_RADIUS {
             let cx = ccx + dx;
             let cz = ccz + dz;
-            if cx < 0 || cz < 0 {
-                continue;
-            }
+            // Negative chunk coords are valid (i64 + Euclidean div) — do not skip.
             let center = [
                 (cx as f32 + 0.5) * CHUNK_M,
                 half_y,
@@ -86,6 +84,8 @@ struct App {
     // Last configured surface size (for surface-loss recovery).
     surf_w: u32,
     surf_h: u32,
+    // Last frame timestamp for dt-based movement (frame-rate independent free-fly).
+    last_frame: std::time::Instant,
 }
 
 impl Default for App {
@@ -114,6 +114,7 @@ impl Default for App {
             max_dim: 2048,
             surf_w: 1280,
             surf_h: 800,
+            last_frame: std::time::Instant::now(),
         }
     }
 }
@@ -321,39 +322,51 @@ impl ApplicationHandler for App {
 
 impl App {
     fn update_camera(&mut self) {
-        // Free-fly movement from WASD along the camera's forward/right vectors.
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
-        let forward = [cy * cp, sp, sy * cp];
-        let right = [cy, 0.0, sy];
-        // Movement speed in m/s -> voxels/s on the 12.5 cm scale (1 m = 8 voxels).
-        let speed = 0.8 * 8.0;
-        if self.keys.contains(&winit::keyboard::PhysicalKey::Code(
-            winit::keyboard::KeyCode::KeyW,
-        )) {
-            self.camera.eye[0] += forward[0] * speed;
-            self.camera.eye[1] += forward[1] * speed;
-            self.camera.eye[2] += forward[2] * speed;
+        // Frame-rate independent free-fly: integrate movement with a real dt (seconds) so
+        // speed is in world-m/s regardless of FPS. Without dt, WASD added a fixed step every
+        // frame → "super fast at high FPS". See `voxel_gpu::free_fly_step` (unit-tested).
+        let now = std::time::Instant::now();
+        let dt = self.last_frame.elapsed().as_secs_f32().clamp(0.0, 0.1);
+        self.last_frame = now;
+        // Build the key bitmask: W=1, S=2, D=4, A=8.
+        let mut keys = 0u8;
+        if self
+            .keys
+            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW))
+        {
+            keys |= 1;
         }
-        if self.keys.contains(&winit::keyboard::PhysicalKey::Code(
-            winit::keyboard::KeyCode::KeyS,
-        )) {
-            self.camera.eye[0] -= forward[0] * speed;
-            self.camera.eye[1] -= forward[1] * speed;
-            self.camera.eye[2] -= forward[2] * speed;
+        if self
+            .keys
+            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyS))
+        {
+            keys |= 2;
         }
-        if self.keys.contains(&winit::keyboard::PhysicalKey::Code(
-            winit::keyboard::KeyCode::KeyD,
-        )) {
-            self.camera.eye[0] += right[0] * speed;
-            self.camera.eye[2] += right[2] * speed;
+        if self
+            .keys
+            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyD))
+        {
+            keys |= 4;
         }
-        if self.keys.contains(&winit::keyboard::PhysicalKey::Code(
-            winit::keyboard::KeyCode::KeyA,
-        )) {
-            self.camera.eye[0] -= right[0] * speed;
-            self.camera.eye[2] -= right[2] * speed;
+        if self
+            .keys
+            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA))
+        {
+            keys |= 8;
         }
+        // Comfortable fly speed on the 12.5 cm scale: 8 m/s base, Shift = 4x sprint.
+        let mut speed = 8.0;
+        if self
+            .keys
+            .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ShiftLeft))
+            || self
+                .keys
+                .contains(&winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ShiftRight))
+        {
+            speed *= 4.0;
+        }
+        self.camera.eye =
+            voxel_gpu::free_fly_step(self.camera.eye, self.yaw, self.pitch, dt, speed, keys);
     }
 
     fn render_frame(&mut self) {
@@ -391,9 +404,9 @@ impl App {
             for dz in -VIEW_RADIUS..=VIEW_RADIUS {
                 let cx = ccx + dx;
                 let cz = ccz + dz;
-                if cx < 0 || cz < 0 {
-                    continue;
-                }
+                // NOTE: negative chunk coords are valid (ChunkCoord is i64 + Euclidean div).
+                // Do NOT skip them — skipping caused the "white screen when flying into
+                // negative space" bug.
                 // Frustum cull: skip chunks fully outside the camera view.
                 let center = [
                     (cx as f32 + 0.5) * CHUNK_M,

@@ -55,6 +55,45 @@ pub fn spawn_eye_y_m(top_voxel: i64, eye_clearance_voxels: i64) -> f32 {
     (top_voxel + eye_clearance_voxels) as f32 * VOXEL_SIZE_M
 }
 
+/// Pure first-person free-fly step. `dt` is the frame delta in **seconds** so movement
+/// speed is frame-rate independent (the same world distance per second regardless of FPS).
+/// `speed` is in world-meters/second. `keys` is a bitmask: bit0=W, bit1=S, bit2=D, bit3=A.
+/// Returns the new eye position. Kept pure + public so the live client and unit tests share
+/// the exact same integration (no per-frame drift, no "super fast at high FPS" bug).
+pub fn free_fly_step(
+    eye: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    dt: f32,
+    speed: f32,
+    keys: u8,
+) -> [f32; 3] {
+    let (sy, cy) = yaw.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    let forward = [cy * cp, sp, sy * cp];
+    let right = [cy, 0.0, sy];
+    let mut e = eye;
+    if keys & 1 != 0 {
+        e[0] += forward[0] * speed * dt;
+        e[1] += forward[1] * speed * dt;
+        e[2] += forward[2] * speed * dt;
+    }
+    if keys & 2 != 0 {
+        e[0] -= forward[0] * speed * dt;
+        e[1] -= forward[1] * speed * dt;
+        e[2] -= forward[2] * speed * dt;
+    }
+    if keys & 4 != 0 {
+        e[0] += right[0] * speed * dt;
+        e[2] += right[2] * speed * dt;
+    }
+    if keys & 8 != 0 {
+        e[0] -= right[0] * speed * dt;
+        e[2] -= right[2] * speed * dt;
+    }
+    e
+}
+
 /// Build a dedicated rayon pool that keeps one core free for the render thread.
 pub fn mesh_pool() -> rayon::ThreadPool {
     rayon::ThreadPoolBuilder::new()
@@ -84,6 +123,7 @@ pub fn spawn_mesh(
 mod tests {
     use super::*;
     use voxel_core::coords::ChunkCoord;
+    use voxel_worldgen;
 
     #[test]
     fn mesh_chunk_offthread_streams_result() {
@@ -131,7 +171,54 @@ mod tests {
         }
     }
 
-    /// Reproduces the client's "never go white" invariant: a freshly-requested chunk must
+    /// Movement must be frame-rate independent: the same key held for the same wall-clock
+    /// time must travel the same world distance regardless of how many frames elapse. This
+    /// catches the "super fast at high FPS" bug where speed was added per-frame (no dt).
+    #[test]
+    fn free_fly_speed_is_frame_rate_independent() {
+        let eye0 = [0.0, 3.88, 0.0];
+        let yaw = -std::f32::consts::FRAC_PI_2; // look down -Z
+        let pitch = -0.4;
+        let speed = 8.0; // m/s
+        let len = |a: [f32; 3], b: [f32; 3]| {
+            ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        };
+        // 1 second of W held, integrated in 1 big step vs 600 small steps (600 FPS).
+        let one_big = free_fly_step(eye0, yaw, pitch, 1.0, speed, 1);
+        let mut e = eye0;
+        for _ in 0..600 {
+            e = free_fly_step(e, yaw, pitch, 1.0 / 600.0, speed, 1);
+        }
+        let d_big = len(one_big, eye0);
+        let d_small = len(e, eye0);
+        let rel = (d_big - d_small).abs() / d_big.max(1e-6);
+        assert!(
+            rel < 1e-3,
+            "frame-rate dependent movement: 1-step={d_big:.4} 600-step={d_small:.4} (rel={rel:.4})"
+        );
+        // Absolute distance over 1 s equals speed (8 m/s) * |forward| (=1) = 8 m,
+        // independent of pitch (forward is a unit vector). Not per-frame*600.
+        assert!(
+            (d_big - speed).abs() < 1e-2,
+            "W for 1 s at 8 m/s should move ~{speed} m, moved {d_big:.4} m"
+        );
+    }
+
+    /// Negative chunk coordinates must yield real terrain, not be skipped. The client used to
+    /// `continue` on `cx < 0 || cz < 0`, which made flying into negative space produce zero
+    /// triangles → white screen. This proves negative chunks generate + mesh normally.
+    #[test]
+    fn negative_chunk_coords_yield_nonempty_mesh() {
+        for &(cx, cz) in &[(-1, -1), (-5, 3), (2, -4)] {
+            let coord = ChunkCoord::new(cx, 0, cz);
+            let chunk = voxel_worldgen::generate_chunk(coord, 7);
+            let tris = mesh_chunk_world_meters(&chunk);
+            assert!(
+                !tris.is_empty(),
+                "negative chunk {cx},{cz} must produce terrain, not be skipped"
+            );
+        }
+    }
     /// eventually land in the cache so the frame has tris to draw. The worker is async, so we
     /// wait briefly for it (mirrors the real frame loop, which retries every frame until the
     /// mesh arrives — the client's sync fallback covers frame 1).

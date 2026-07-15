@@ -74,6 +74,15 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       textuur. Benchmark 1 km² p50=0,24ms, avg_fps≈3636 — géén FPS-daling t.o.v. pre-texture 3753.
       Workspace 36 test-binaires groen. Volgende: P1 (BCn+mipmaps), P2 (echte 2K/4K textures),
       P3 (specular/normal).
+27c. ✅ WASD-bewegingsbug gefixt (2026-07-15): **(1) te snel** — `update_camera` telde speed
+      per-frame op (geen dt), ~384 m/s bij hoge FPS. Nu `voxel_gpu::free_fly_step(eye,yaw,pitch,
+      dt,speed,keys)` met echte frame-dt (8 m/s basis, Shift=4× sprint). **(2) wit bij vliegen**
+      — streaming-loop én `nearest_visible_chunk` skipten negatieve chunks (`cx<0||cz<0`),
+      terwijl `ChunkCoord` i64 + Euclidean div is en negatieve coords geldig zijn → 0 chunks →
+      tris=0 → wit. Guards verwijderd. Strikte TDD: `free_fly_speed_is_frame_rate_independent`
+      + `negative_chunk_coords_yield_nonempty_mesh` (Rood→Groen). **Geverifieerd:** live capture
+      bij camera 200 m in negatieve ruimte = 7116 kleuren, NEAR_WHITE_PCT=0.1% (niet wit);
+      normale spawn = 6575 kleuren, 0.002% wit. 36/36 test-binaires groen.
 
 ## Auditwaarschuwing
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.

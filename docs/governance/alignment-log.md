@@ -2,6 +2,20 @@
 
 Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastgelegd.
 
+## 2026-07-15 — WASD-bewegingsbug gefixt (te snel + wit bij vliegen)
+
+- Twee oorzaken gevonden en onder TDD gefixt:
+  1. **Super snel:** `update_camera` telde `speed` per-frame op (geen dt) → bij hoge FPS
+     ~384 m/s. Nu `voxel_gpu::free_fly_step(eye, yaw, pitch, dt, speed, keys)` met echte
+     frame-dt; 8 m/s basis, Shift = 4× sprint. Test `free_fly_speed_is_frame_rate_independent`.
+  2. **Wit bij vliegen:** streaming-loop én `nearest_visible_chunk` hadden `if cx<0||cz<0
+     continue` → vliegen in negatieve ruimte selecteerde 0 chunks → tris=0 → wit.
+     `ChunkCoord` is i64 + Euclidean div, dus negatieve chunks zijn geldig. Guards verwijderd.
+     Test `negative_chunk_coords_yield_nonempty_mesh` bewijst negatieve chunks geven terrain.
+- Geverifieerd: live capture bij camera 200 m in negatieve ruimte = 7116 unieke kleuren,
+  NEAR_WHITE_PCT=0.1% (niet wit). Normale spawn = 6575 kleuren, 0.002% wit.
+  Workspace 36 test-binaires groen.
+
 ## 2026-07-15 — Mijlpaal 4 P0: 4K-texture-system (texture-array + triplanar + PBR)
 
 - P0 GEDAAN: `GpuScene` krijgt `MaterialPbr`-storage-buffer + `texture_2d_array` albedo +
