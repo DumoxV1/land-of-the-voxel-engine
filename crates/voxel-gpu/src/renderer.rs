@@ -958,7 +958,7 @@ mod tests {
                     / 32;
                 voxel_worldgen::generate_chunk(voxel_core::coords::ChunkCoord::new(cx, cy, cz), 7)
             };
-            let tris = crate::mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full);
+            let tris = crate::mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, true);
             let cam = GpuCamera::new(
                 [2.0, 4.0, 6.0],
                 -std::f32::consts::FRAC_PI_2,

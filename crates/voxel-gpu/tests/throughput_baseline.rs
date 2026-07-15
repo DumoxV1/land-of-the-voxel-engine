@@ -19,7 +19,7 @@ fn throughput_baseline() {
         let col_top = (surface_height_m(cx*32+16, cz*32+16, seed) / 0.125) as i64;
         let cy = ((col_top + 32) / 32).min(12);
         let c = generate_chunk(ChunkCoord::new(cx, cy, cz), seed);
-        let tris = mesh_chunk_world_meters(&c, voxel_gpu::chunk_stream::Lod::Full);
+        let tris = mesh_chunk_world_meters(&c, voxel_gpu::chunk_stream::Lod::Full, true);
         total_tris += tris.len();
     }
     let ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -56,7 +56,7 @@ fn stream_volume_bench() {
             }
             for cy in 0..=max_cy {
                 let c = generate_chunk(ChunkCoord::new(cx, cy, cz), seed);
-                let tris = mesh_chunk_world_meters(&c, voxel_gpu::chunk_stream::Lod::Full);
+                let tris = mesh_chunk_world_meters(&c, voxel_gpu::chunk_stream::Lod::Full, true);
                 if tris.is_empty() {
                     air += 1;
                 }
