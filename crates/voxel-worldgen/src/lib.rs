@@ -23,11 +23,12 @@ const STONE: u8 = 3;
 const SAND: u8 = 7;
 const SNOW: u8 = 8;
 
-/// How far below the surface we still fill solid voxels. Everything deeper stays AIR
-/// (not drawn anyway — greedy meshing only emits the shell). Bounds generation work to
-/// the visible shell (memo docs/research/voxel-loading-standard.md, P1). 8 vox = 1 m:
-/// enough collision footing, halves+ gen cost on deep chunks.
-const BEDROCK_DEPTH: i64 = 8;
+/// How far below the surface we still fill solid voxels. Kept at 1 (a single support voxel
+/// under the grass) so the world is a thin shell, not an 8-voxel-thick slab: flying beneath
+/// the map then shows nothing (the bottom face is culled against the virtual bedrock floor in
+/// the mesher, and there is no thick side wall to see). Collision still lands on the surface
+/// voxel. One voxel of footing halves generation cost on deep chunks.
+const BEDROCK_DEPTH: i64 = 1;
 
 /// Hard upper bound on `surface_height_m` in **meters**, used by the O(1) air-chunk early-out
 /// in `generate_chunk`. `surface_height_m = base + mid + micro` where each term is a

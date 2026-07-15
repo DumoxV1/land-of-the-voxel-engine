@@ -48,11 +48,28 @@ struct VoxView<'a> {
 
 impl<'a> VoxView<'a> {
     fn is_solid(&self, x: i64, y: i64, z: i64) -> bool {
-        if x < 0 || y < 0 || z < 0 || x >= self.size || y >= self.size || z >= self.size {
-            return false; // border is air
+        if x < 0 || z < 0 || x >= self.size || z >= self.size {
+            return false; // horizontal border is air
+        }
+        if y < 0 {
+            return true; // bedrock: virtual solid floor below the world, so the
+                         // bottom faces of the lowest terrain layer are culled and
+                         // you never see "under the map" when flying beneath it.
+        }
+        if y >= self.size {
+            return false; // sky above is air
         }
         let m = self.chunk.get(LocalVoxel::new(x as u8, y as u8, z as u8));
         m != MaterialId::from(0u8)
+    }
+
+    /// Like `is_solid`, but treats the virtual bedrock floor (y<0) as AIR so it never
+    /// acts as an AO occluder — the floor is not a real surface, just a culling boundary.
+    fn is_solid_ao(&self, x: i64, y: i64, z: i64) -> bool {
+        if y < 0 {
+            return false;
+        }
+        self.is_solid(x, y, z)
     }
 
     fn material(&self, x: i64, y: i64, z: i64) -> MaterialId {
@@ -95,15 +112,15 @@ fn corner_ao(
     let sx = (x as f64 + nx + u.0 * su_s) as i64;
     let sy = (y as f64 + ny + u.1 * su_s) as i64;
     let sz = (z as f64 + nz + u.2 * su_s) as i64;
-    let s1 = view.is_solid(sx, sy, sz) as u8;
+    let s1 = view.is_solid_ao(sx, sy, sz) as u8;
     let tx = (x as f64 + nx + v.0 * sv_s) as i64;
     let ty = (y as f64 + ny + v.1 * sv_s) as i64;
     let tz = (z as f64 + nz + v.2 * sv_s) as i64;
-    let s2 = view.is_solid(tx, ty, tz) as u8;
+    let s2 = view.is_solid_ao(tx, ty, tz) as u8;
     let cx = (x as f64 + nx + u.0 * su_s + v.0 * sv_s) as i64;
     let cy = (y as f64 + ny + u.1 * su_s + v.1 * sv_s) as i64;
     let cz = (z as f64 + nz + u.2 * su_s + v.2 * sv_s) as i64;
-    let c = view.is_solid(cx, cy, cz) as u8;
+    let c = view.is_solid_ao(cx, cy, cz) as u8;
     // Minecraft-style: if both edge voxels are solid the corner is fully occluded.
     let occ = if s1 == 1 && s2 == 1 { 3u8 } else { s1 + s2 + c };
     let t = occ as f32 / 3.0;
