@@ -297,7 +297,7 @@ pub fn run_mesh_job(
         chunk: chunk.clone(),
     });
     // Phase 2: mesh-later. The (more expensive) greedy mesh follows.
-    let tris = mesh_chunk_world_meters(&chunk, job.lod, true);
+    let tris = mesh_chunk_world_meters(&chunk, job.lod, false);
     let _ = tx.send(WorkerMsg::Mesh {
         coord: job.coord,
         tris,
@@ -327,7 +327,7 @@ mod tests {
         let cy = (col_top_vox / CHUNK_SIZE as i64).clamp(0, 12);
         let coord = ChunkCoord::new(cx, cy, cz);
         let chunk = voxel_worldgen::generate_chunk(coord, seed);
-        let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, true);
+        let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false);
         assert!(
             !tris.is_empty(),
             "spawn surface chunk ({cx},{cy},{cz}) must produce triangles for frame-1 render"
@@ -560,7 +560,7 @@ mod tests {
                 / 32;
             let coord = ChunkCoord::new(cx, cy, cz);
             let chunk = voxel_worldgen::generate_chunk(coord, 7);
-            let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, true);
+            let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false);
             assert!(
                 !tris.is_empty(),
                 "negative chunk {cx},{cz} must produce terrain, not be skipped"

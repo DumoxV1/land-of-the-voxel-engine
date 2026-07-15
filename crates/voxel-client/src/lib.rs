@@ -739,7 +739,7 @@ impl App {
                 }
                 let coord = ChunkCoord::new(ccx, cy_seed, ccz);
                 let chunk = self.world.get_or_generate(coord);
-                let mesh = mesh_chunk_world_meters(&chunk, voxel_gpu::chunk_stream::Lod::Full, true);
+                let mesh = mesh_chunk_world_meters(&chunk, voxel_gpu::chunk_stream::Lod::Full, false);
                 self.mesh_cache.insert(coord, mesh.clone(), self.frame);
                 tris.extend_from_slice(&mesh);
             }
