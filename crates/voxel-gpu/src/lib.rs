@@ -124,10 +124,14 @@ pub fn mesh_chunk_world_meters(
         // Imposter is handled above (early return); this arm keeps the match exhaustive.
         crate::chunk_stream::Lod::Imposter => (chunk.clone(), VOXEL_SIZE_M),
     };
+    // World origin in coarse-voxel units: `to_world` multiplies by `voxel_scale`, so to
+    // land the chunk at its true world position (coord * CHUNK_SIZE * VOXEL_SIZE_M) the
+    // origin must be scaled by VOXEL_SIZE_M / voxel_scale (NOT its inverse — inverting it
+    // placed Half chunks at 4x their position, i.e. squares floating in the sky).
     let origin = [
-        mesh_chunk.coord.x as f32 * CHUNK_SIZE as f32 * (voxel_scale / VOXEL_SIZE_M),
-        mesh_chunk.coord.y as f32 * CHUNK_SIZE as f32 * (voxel_scale / VOXEL_SIZE_M),
-        mesh_chunk.coord.z as f32 * CHUNK_SIZE as f32 * (voxel_scale / VOXEL_SIZE_M),
+        mesh_chunk.coord.x as f32 * CHUNK_SIZE as f32 * (VOXEL_SIZE_M / voxel_scale),
+        mesh_chunk.coord.y as f32 * CHUNK_SIZE as f32 * (VOXEL_SIZE_M / voxel_scale),
+        mesh_chunk.coord.z as f32 * CHUNK_SIZE as f32 * (VOXEL_SIZE_M / voxel_scale),
     ];
     let to_world = |p: Vec3| {
         Vec3::new(
@@ -469,11 +473,12 @@ mod tests {
     }
 
     #[test]
-    fn lod_half_downsamples_to_double_scale() {
-        // A solid single voxel at local (0,0,0): Full meshes 1 voxel at 0.125 m, Half
-        // meshes 1 coarse voxel at 0.25 m (2x) world scale. The voxel sits on the world
-        // floor (y=0), so its bottom face is culled against the bedrock floor (5 faces =
-        // 10 tris). Both must be non-empty; the Half mesh's world extent must be ~2x Full.
+    fn lod_half_shares_full_world_origin_at_double_voxel_size() {
+        // A solid single voxel at local (0,0,0): Full meshes it at 0.125 m voxels, Half
+        // downsamples 2x and meshes at 0.25 m voxels. Critical invariant: a Half chunk
+        // occupies the SAME world footprint as the Full chunk at the same coord — only the
+        // voxel granularity differs. (Regression: the origin factor was inverted, placing
+        // Half chunks at 4x their world position => squares floating in the sky.)
         use voxel_core::coords::LocalVoxel;
         use voxel_core::palette::MaterialId;
         let coord = ChunkCoord::new(5, 0, 5);
@@ -483,13 +488,17 @@ mod tests {
         let half = mesh_chunk_world_meters(&full_chunk, crate::chunk_stream::Lod::Half, false);
         assert_eq!(full.len(), 10, "full-res floor voxel = 10 tris (bottom culled on bedrock)");
         assert_eq!(half.len(), 10, "half-res floor block = 10 tris (bottom culled on bedrock)");
-        // Half mesh lives at 2x world scale -> its max vertex coordinate is ~2x the Full's.
-        let full_max = full.iter().flat_map(|t| [t.a, t.b, t.c]).map(|v| v.x).fold(0.0f32, f32::max);
-        let half_max = half.iter().flat_map(|t| [t.a, t.b, t.c]).map(|v| v.x).fold(0.0f32, f32::max);
-        assert!(
-            half_max > full_max * 1.5,
-            "half-res mesh must be ~2x larger in world meters (full_max={full_max}, half_max={half_max})"
-        );
+        let min_x = |m: &[Triangle]| m.iter().flat_map(|t| [t.a, t.b, t.c]).map(|v| v.x).fold(f32::MAX, f32::min);
+        let max_x = |m: &[Triangle]| m.iter().flat_map(|t| [t.a, t.b, t.c]).map(|v| v.x).fold(f32::MIN, f32::max);
+        // Both LODs must start at the chunk's true world origin (coord * 32 * 0.125).
+        let expected_origin = coord.x as f32 * CHUNK_SIZE as f32 * VOXEL_SIZE_M; // 20.0 m
+        assert!((min_x(&full) - expected_origin).abs() < 1e-3, "Full origin {} != {expected_origin}", min_x(&full));
+        assert!((min_x(&half) - expected_origin).abs() < 1e-3, "Half must share Full's world origin (got {}, want {expected_origin})", min_x(&half));
+        // Half voxels are 2x the size: the single-voxel extent is 0.25 m vs Full's 0.125 m.
+        let full_ext = max_x(&full) - min_x(&full);
+        let half_ext = max_x(&half) - min_x(&half);
+        assert!((full_ext - VOXEL_SIZE_M).abs() < 1e-3, "full voxel extent = 0.125 m (got {full_ext})");
+        assert!((half_ext - VOXEL_SIZE_M * 2.0).abs() < 1e-3, "half voxel extent = 0.25 m (got {half_ext})");
     }
 
     #[test]
