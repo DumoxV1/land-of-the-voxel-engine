@@ -2,6 +2,23 @@
 
 Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastgelegd.
 
+## 2026-07-15 — Fase 2: LRU mesh-cache + view-distance GPU-residency policy
+
+- Geïmplementeerd onder strikte TDD (vóór code stond `mesh_cache: HashMap` = onbegrensde cache
+  zonder evictie → RAM-lek bij grote werelden). Nieuw: `crates/voxel-gpu/src/cache.rs`:
+  - `LruMeshCache`: keyed per `ChunkCoord`, evict least-recently-visible op entry-cap (200k)
+    én RAM-budget (12 GB, ~32 B/tri). Deterministic worldgen → geen voxel-cache nodig, wel
+    mesh-cache (meshen is duur). Geïnspireerd door VoxelBee Devlog #5 (tweelaags cache), maar
+    op mesh-niveau (onze polygon-pipeline ≠ z'n SVO-raycast).
+  - `gpu_resident_set()`: kiest dichtstbijzijnde `max_gpu_chunks` bij camera-eye (view-LRU
+    stand-in met hysteresis; hysteresis volgt later).
+- Tests (Rood→Groen): `lru_mesh_cache_evicts_least_recently_visible`,
+  `lru_mesh_cache_ram_budget_evicts`, `view_lru_vbo_keeps_near_chunks`.
+- `App` gebruikt nu `LruMeshCache` (init 200k/12GB), `frame`-counter, `touch()` per zichtbaar
+  chunk. VBO-pool blijft één veilige 256 MB buffer (evictie al gekapt).
+- Geverifieerd: live autopilot 15s cirkelvlucht (800 m) → 9119 kleuren, NEAR_WHITE=2.4%
+  (sneeuw zichtbaar), CLEAR=0% — LRU evict duizenden chunks zonder crash/wit. 36/36 groen.
+
 ## 2026-07-15 — Worldgen: fBm-heightmap + biome-systeem (meer diepte/variatie)
 
 - User brainstormde over meerdere voxel-groottes (25/12,5/6,25/3,125 cm) voor meer diepte.

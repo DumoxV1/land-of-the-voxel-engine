@@ -5,6 +5,7 @@
 
 pub mod probe;
 pub mod renderer;
+pub mod cache;
 
 /// Mijlpaal 3 (P3): non-blocking chunk meshing.
 ///

@@ -187,6 +187,19 @@ Bevy/wgpu (ADR-0004, status Proposed).
 - [ ] Entiteiten/agents, quests, economie bovenop de server-authoritative basis.
 - [ ] Filmische presentatie: post-processing (bloom, tonemapping), audio, UI.
 
+### Fase 7 — Raytracing & geavanceerde rendering (latere fase, stap-voor-stap)
+- [ ] **Vooronderzoek (gedaan 2026-07-15):** VoxelBee Devlog #5 cache-architectuur
+      (`docs/research/2026-07-15-voxelbee-cache-onderzoek.md`). Zijn GPU-raycast-cache is een
+      fundamenteel andere pipeline (SVO-raycasting, geen polygon-meshes) dan onze mesh-renderer.
+      Conclusie: bruikbaar *principe* = tweelaags cache + view-LRU + hysteresis (reeds deels in
+      Fase 2). Echte raytracing = aparte render-path, niet een tweak van de huidige pipeline.
+- [ ] Optioneel hysteresis toevoegen aan `gpu_resident_set()` (voorkomt thrashing net buiten
+      beeld bij rondvliegen).
+- [ ] **Raytracing-path (onderzoeksspike):** aparte wgpu-raytracing-pipeline (`VkRayTracing`/
+      `wgpu` experimental) voor reflecties/GI op een subset van materialen, naast de bestaande
+      raster-path. Pas als Fase 3 (belichting) + Fase 5 (schaal) staan — niet eerder.
+- [ ] Post-processing-stapel uitbreiden (bloom, tonemapping, SSAO) bovenop Fase 6.
+
 ---
 
 ## Harde grenzen (governance)

@@ -65,7 +65,8 @@ struct App {
     scene: Option<GpuScene>,
     world: World,
     seed: u32,
-    mesh_cache: HashMap<ChunkCoord, Vec<Triangle>>,
+    mesh_cache: voxel_gpu::cache::LruMeshCache,
+    frame: u64,
     mesh_pool: rayon::ThreadPool,
     mesh_tx: crossbeam_channel::Sender<MeshResult>,
     mesh_rx: crossbeam_channel::Receiver<MeshResult>,
@@ -98,7 +99,9 @@ impl Default for App {
             scene: None,
             world: World::new(seed),
             seed,
-            mesh_cache: HashMap::new(),
+            // LRU mesh cache: cap 200k chunks (~RAM-light) or 12 GB estimated, whichever first.
+            mesh_cache: voxel_gpu::cache::LruMeshCache::new(200_000, 12 * 1024 * 1024 * 1024),
+            frame: 0,
             mesh_pool: mesh_pool(),
             mesh_tx,
             mesh_rx,
@@ -370,6 +373,7 @@ impl App {
     }
 
     fn render_frame(&mut self) {
+        self.frame += 1;
         let (Some(scene), Some(surface)) = (&mut self.scene, &self.surface) else {
             return;
         };
@@ -388,7 +392,7 @@ impl App {
             if self.requested_gen.get(&r.coord).copied() != Some(r.gen) {
                 continue;
             }
-            self.mesh_cache.insert(r.coord, r.tris);
+            self.mesh_cache.insert(r.coord, r.tris, self.frame);
             self.pending.remove(&r.coord);
         }
 
@@ -418,7 +422,10 @@ impl App {
                 }
                 let coord = ChunkCoord::new(cx, 0, cz);
                 if let Some(m) = self.mesh_cache.get(&coord) {
-                    tris.extend_from_slice(m); // ready: draw (frustum-cull intact)
+                    let slice = m.tris.clone();
+                    tris.extend_from_slice(&slice); // ready: draw (frustum-cull intact)
+                    // Mark recently visible (separate mutable borrow, after the immutable read).
+                    self.mesh_cache.touch(&coord, self.frame);
                 } else if !self.pending.contains(&coord) {
                     // Not ready and not yet requested: spawn off-thread generate+mesh.
                     let g = self.requested_gen.entry(coord).or_insert(0);
@@ -444,7 +451,7 @@ impl App {
             if let Some(coord) = nearest_visible_chunk(&vp, half, half_y, ccx, ccz) {
                 let chunk = self.world.get_or_generate(coord);
                 let mesh = mesh_chunk_world_meters(&chunk);
-                self.mesh_cache.insert(coord, mesh.clone());
+                self.mesh_cache.insert(coord, mesh.clone(), self.frame);
                 tris.extend_from_slice(&mesh);
             }
         }

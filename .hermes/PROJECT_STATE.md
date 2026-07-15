@@ -94,6 +94,14 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       Snow-regio lichtblauw-wit; 36/36 groen. Volgende: M4 P1 (BCn+mipmaps) of Fase-3
       vertex-AO + schaduw + smooth voxels.
 
+27e. ✅ Fase 2 cache-spike (2026-07-15): `mesh_cache` was onbegrensde `HashMap` (RAM-lek).
+      Nieuw `cache.rs`: `LruMeshCache` (200k entries / 12 GB RAM, LRU-evict op laatst-zichtbaar)
+      + `gpu_resident_set()` (view-LRU stand-in). `App` gebruikt LRU + `frame`-counter + `touch`.
+      TDD: 3 nieuwe tests (Rood→Groen). Geverifieerd: live autopilot 15s cirkelvlucht → 9119
+      kleuren, NEAR_WHITE=2.4%, CLEAR=0% (LRU evict zonder crash/wit). 36/36 groen. Volgende:
+      M4 P1 (BCn+mipmaps) of Fase-3 vertex-AO + schaduw + smooth voxels. Raytracing genoteerd
+      als latere fase (zie roadmap — vereist andere pipeline dan huidige mesh-renderer).
+
 ## Auditwaarschuwing
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
 

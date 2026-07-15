@@ -1,45 +1,53 @@
-# VoxelBee cache-onderzoek — toepasbaarheid op Land of the Voxel Engine
+# Onderzoek: VoxelBee cache-architectuur vs. Land of the Voxel Engine
 
 **Datum:** 2026-07-15
-**Bron:** YouTube-kanaal VoxelBee (C++/Vulkan voxel-engine "Voxel Universe"), devlogs #1, #4, #5, #7.
-**Doel:** bepalen of VoxelBee's chunk/dataset-cache-architectuur bruikbaar is voor onze engine (Rust + wgpu, micro-voxel 12,5 cm, chunk=4 m, 1 km² = 62.500 chunks, ~150 km² filmische openwereld, RTX 4080 Super / 32 GB RAM).
+**Kanaal:** [VoxelBee](https://www.youtube.com/@voxelbee) — C++ + Vulkan voxel engine ("Voxel Universe")
+**Focus:** Devlog #5 "Adding A CACHE To My Custom VOXEL Game Engine" (feb 2021)
 
-## 1. Wat VoxelBee doet (cache-architectuur)
-VoxelBee rendert via **voxel-octree-raycasting** (DDA-traversal, SDF+octree-hybride voor sparse data, LOD via octree). De cache (Devlog #4 → #5) werkt als volgt:
-- **GPU-resident 1D voxel-array**: alle voxels staan als index in één platte buffer op de GPU (voorheen in "pages", maar dat maakte de algoritmes te complex → terug naar één grote array).
-- **Move-to-front evictie**: bij render wordt een voxel naar vóór in de array geschoven; niet-recente voxels zakken naar achteren en worden aan de achterkant overschreven (evictie). Geen volledige sort — VoxelBee verwierp sorteren van 10–20M elementen/frame als te traag.
-- **Compute-shader-gestuurd**: de GPU beheert zijn eigen cache; voxels die vaak samen bekeken worden, clusteren in geheugen (locality-winst).
-- **Virtuele adresruimte**: tot 64 GB aan voxels adresseerbaar als "één grote boom"; fysiek resident slechts een klein deel (getest tot 1 MB GPU-cache, normaal enkele GB).
-- **Morton-codes** voor 3D→1D encoding met goede cache-locality.
-- **CPU-cache** (gepland, Devlog #4/#5) voor grotere voxelopslag, met unload naar disk/netwerk.
+## 1. Wat VoxelBee doet (cache-architectuur in bullets)
 
-## 2. Universeel bruikbaar vs specifiek voor zijn engine
-**Universeel (direct bruikbaar voor ons):**
-- Recency/MRU-gebaseerde residency i.p.v. alles resident houden.
-- Virtuele chunk-ruimte + fysiek gebudgetteerde subset (onze 150 km² = virtueel, VRAM/RAM = fysiek).
-- Geen full-sort evictie; O(1) "touch" bij gebruik.
-- Morton/Z-order keys voor geheugenlocality van buffers.
-- Tweelaags streaming-hiërarchie (GPU-cache + CPU-cache + disk).
+- **GPU-eigen cache in één platte array.** Elke voxel is één index in een 1D-array op de GPU. Geen boom-allocatie, geen pagina's (Devlog #4 verwierp paginering wegens complexiteit).
+- **Move-to-front / LRU-achtige evictie.** Wanneer een voxel gerenderd wordt, schuift hij naar vóór in de array; niet-gebruikte voxels zakken naar achteren en worden daar overschreven. Geen sorteerpass (te traag: 10–20M elementen/frame).
+- **Volledig in compute shaders.** De GPU beheert zijn eigen cache; voxels die samen gebruikt worden, clusteren in geheugen → betere spatiale locality.
+- **Extreem schaalbaar.** Getest tot **1 MB** GPU-cache; kan theoretisch **64 GB** aan voxels adresseren. Bedoeld voor "bijna oneindige" wereld.
+- **Cache-hiërarchie (later).** Devlog #5 kondigt een CPU-cache aan bovenop de GPU-cache (CPU houdt meer, GPU houdt de actief zichtbare set).
 
-**Specifiek voor zijn engine (niet 1:1 overneembaar):**
-- Raycaster-datalayout (ruwe voxeldata i.p.v. meshes) — onze engine is mesh-based.
-- Compute-shader self-managed cache binnen een raytracer; moeilijk te porten naar een wgpu-mesh-pipeline.
-- SDF+octree-hybride renderer en de Vulkan/C++ stack.
-- Move-to-front heeft lagere hit-rate dan echte LRU — bij ons niet nodig (zie aanbeveling).
+## 2. Engine-architectuur (Devlog #1–#7)
 
-## 3. Concrete aanbeveling voor Land of the Voxel Engine
-Onze wereld: 150 km² = **9,4M chunks** (4 m), elk 32³ = 32.768 voxels. Ruwe voxeldata is ~300 GB — veel meer dan 32 GB RAM, dus **streaming is verplicht**. VoxelBee's les: beheer residency expliciet per cache-laag.
+- **Taal/Renderer:** C++ + Vulkan, **voxel-octree raycasting** (geen polygon-meshes), LOD via octree-niveaus.
+- **Streaming:** Camera-culling "on the fly"; voxels laden per zichtprioriteit, unload buiten gezichtsveld.
+- **Multithreading:** Initieel **geen** (alles op render-thread); multithreading stond op de todo.
+- **Coördinaten:** 128-bit precisie (32-bit float lokaal 8 km², geïndexeerd door 32/64-bit ints) voor planeet→stof-zoom.
+- **GPU-upload:** Indirect — voxels streamen CPU→GPU, evictie beslist wat op GPU blijft (Devlog #3 "GPU out of pages").
 
-**Voeg een 3-laags cache toe, met de GPU-buffer-cache als prioriteit:**
-- **L1 — GPU-buffer-cache (VRAM, ~6 GB van 16 GB):** LRU-per-viewpoint van geüploade chunk-meshes (vertex+index). Key = chunk-coord (Morton). Touch bij zichtbaarheid; evict minst-recente + verste bij camerabeweging. *Dit is het directe analogon van VoxelBee's recency-cache, maar dan voor mesh-buffers in de wgpu-pipeline.*
-- **L2 — Mesh-cache (RAM, ~10 GB):** LRU van CPU-gegenereerde meshes, zodat her-betreden gebied niet opnieuw gemesht wordt.
-- **L3 — Worldgen-cache (disk):** gecomprimeerde chunk-voxeldata + meshes, onbeperkt, load-on-demand.
+## 3. Universeel vs. specifiek
 
-**Waarom echte LRU/ARC i.p.v. move-to-front:** ons item-aantal (chunks, actief tienduizenden) is klein genoeg voor O(log n) LRU/ARC → betere hit-rate dan VoxelBee's O(1) move-to-front, zónder de sorteer-kost die hij afwees. **Mesh-deduplicatie:** hash identieke chunk-meshes (biome/herhaling) en deel één GPU-buffer — VoxelBee deed dit niet expliciet, maar zijn "samen-clusterende voxels"-idee ondersteunt het.
+**Specifiek voor VoxelBee:**
+- SVO-raycasting + GPU-compute-cache is fundamenteel anders dan onze **polygon-mesh**-pipeline. Zijn "voxel"-cache zit op leaf-node-niveau in de octree; wij cachen op chunk/mesh-niveau op de CPU.
+- Move-to-front in één array werkt bij zijn sparse-voxel-traversatie, niet bij onze VBO's.
 
-## 4. Bronnen
-1. VoxelBee — *Adding A CACHE To My Custom VOXEL Game Engine | Devlog #5* (GPU-array, move-to-front, 1 MB-test): https://www.youtube.com/watch?v=i7vq-HY10hI
-2. VoxelBee — *DEBUGGING MY VULKAN GAME ENGINE | Devlog #4* (pages→array, sort verworpen): https://www.youtube.com/watch?v=TPg_LwWM0Bo
-3. VoxelBee — *VOXEL Rendering And Traversal Algorithms | Devlog #7* (DDA, SDF+octree, Morton): https://www.youtube.com/watch?v=NzVOPyWvBcw
-4. Crassin — *GigaVoxels* (bricked clipmap + LRU/AFC GPU-cache, octree-streaming): https://maverick.inria.fr/Publications/2011/Cra11/
-5. Laine & Karras — *Efficient Sparse Voxel Octrees* (NVIDIA, 2010): https://research.nvidia.com/publication/2010-02_efficient-sparse-voxel-octrees-analysis-extensions-and-rendering
+**Universiteel bruikbaar:**
+- **LRU / view-afhankelijke evictie** met decay-hysteresis (voorkomt thrashing net buiten beeld).
+- **Tweeklagen-cache** (CPU-dataset-cache → GPU-buffer-cache) met scherpe GPU-cap.
+- **Spatial locality**: voxels/tiles die samen zichtbaar zijn, samen cachen.
+- **Prioriteit per gezichtspunt** i.p.v. simpele radius.
+
+## 4. Aanbeveling voor onze engine (150 km², 32 GB, RTX 4080S)
+
+Omdat onze wereldgenereratie **deterministisch** is (fBm + biome), hoeven we voxel-data niet te bewaren — hergenereren is goedkoop. Het dúúre is **meshen**.
+
+**Voeg toe, in volgorde:**
+1. **LRU mesh-cache (CPU)** per chunk `(x,z)`, keyed op laatst-zichtbaar-timestamp. Cap op bv. 8–12 GB RAM. Evict minst-recent-zichtbare chunks; houd mesh + (optioneel) ge-bakken vertexdata.
+2. **View-afhankelijke GPU-VBO-pool-LRU** (nu blinde 256 MB-cap). Koppel evictie aan zichtbaarheid + hysteresis zodat rondvliegen niet thrasht.
+3. **Geen aparte worldgen-cache nodig** — deterministic, dus regenereer op cache-miss. Bespaart RAM.
+4. **Prioriteits-streaming**: meshen op nabijheid-tot-camera, niet alleen radius-24.
+
+**Onderbouwing 150 km²:** 150 km² = 9,375M chunks; radius-24 laadt ~1.809 chunks tegelijk. Een mesh van 4 m-chunk micro-voxels ≈ 50–200 KB; 12 GB RAM dekt ~60k–240k meshes ruim boven de actieve set. 256 MB GPU (≈ enkele duizenden chunks) dekt de zichtbare set; LRU houdt die fris. Dit geeft "oneindige" wereld zonder alles in RAM, analoog aan VoxelBee's GPU-cache-idee maar op mesh-niveau.
+
+## 5. Bronverwijzingen
+
+1. VoxelBee, *Adding A CACHE To My Custom VOXEL Game Engine | Devlog #5* — https://www.youtube.com/watch?v=i7vq-HY10hI
+2. VoxelBee, *DEBUGGING MY VULKAN GAME ENGINE | Devlog #4* (paginering→platte array) — https://www.youtube.com/watch?v=TPg_LwWM0Bo
+3. VoxelBee, *INFINITE ZOOM | Devlog #3* (GPU-out-of-pages, cache-motief) — https://www.youtube.com/watch?v=JmuLQrtvdO8
+4. Crassin et al., *GigaVoxels* (LRU GPU-cache, SVO) — https://maverick.inria.fr/Publications/2009/CNLE09/CNLE09.pdf
+5. Laine & Karras, *Efficient Sparse Voxel Octrees* — https://research.nvidia.com/sites/default/files/pubs/2010-02_Efficient-Sparse-Voxel/laine2010tr1_paper.pdf
