@@ -15,7 +15,7 @@ chunk-set ~13x. Fallout gefixt in `39be666`:
 **Huidige harde limiet:** 256 MB VBO = plafond voor zichtbare terrain. Alles erboven
 wordt getruncate (geen crash, maar incomplete wereld bij grote view-distance).
 
-## P0 — VBO-cap verhogen (snelste winst, laag risico)
+## P0 — VBO-cap verhogen (DONE 2026-07-15)
 - **Waar:** `crates/voxel-gpu/src/renderer.rs:539` `max_buf = min(max_buffer_size, 256MB)`.
 - **Wat:** verhoog naar 1-2 GB (RTX 4080S heeft 16 GB; 256 MB is belachelijk conservatief).
   Check `device.limits().max_buffer_size` — wgpu default is vaak 256 MB, dus je moet
@@ -23,6 +23,9 @@ wordt getruncate (geen crash, maar incomplete wereld bij grote view-distance).
 - **Win:** ~4-8x meer zichtbare terrain binnen dezelfde view-distance, géén LOD nodig.
 - **Verificatie:** live capture (UNIQUE_COLORS stijgt, geen truncate-warn in stderr),
   `grep -c "VBO budget exceeded"` moet 0 zijn na load.
+- **STATUS: DONE** (`MAX_VBO_BYTES = 2 GB` const + device `required_limits.max_buffer_size`
+  gespiegeld). Geverifieerd: spawn eye_y=41.25m, UNIQUE_COLORS 3316→**6366** (2x variatie),
+  VBO-warn=0, 36/36 groen. Committed `25b415f..<nieuw>`.
 
 ## P1 — Chunk-gen profilen + hot-path (fBm-kosten)
 - **Waar:** `crates/voxel-worldgen/src/lib.rs` `generate_chunk` + `fbm01` (5 octaves:

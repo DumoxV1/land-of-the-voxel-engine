@@ -13,6 +13,12 @@ use bytemuck::{Pod, Zeroable};
 use voxel_core::palette::MaterialId;
 use voxel_mesher::Triangle;
 
+/// Max VBO bytes the renderer will allocate for the streamed terrain mesh (P0 spike,
+/// 2026-07-15). Raised from the legacy 256 MB to 2 GB so the vertical-scale terrain
+/// (multi-chunk-Y, thousands of chunks) draws without truncation. Must be mirrored in
+/// `required_limits.max_buffer_size` at device creation (see gpu_window.rs).
+pub const MAX_VBO_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
 /// Per-vertex data uploaded to the GPU.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -535,8 +541,7 @@ impl GpuScene {
         // --- Buffer pooling (S-12c deel 2): reuse one VBO across frames via
         // write_buffer instead of re-allocating a fresh buffer every frame.
         let needed = verts.len() * std::mem::size_of::<GpuVertex>();
-        // Keep the pool at or below the device's max buffer size; grow in safe steps.
-        let max_buf = self.device.limits().max_buffer_size.min(256 * 1024 * 1024) as usize;
+        let max_buf = MAX_VBO_BYTES.min(self.device.limits().max_buffer_size as usize);
         let vbuf = match &self.vbo {
             Some(b) if b.size() >= needed as u64 => b.clone(),
             _ => {
@@ -875,6 +880,17 @@ impl Frustum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P0 spike (2026-07-15): the VBO staging cap must exceed the legacy 256 MB limit so
+    /// the vertical-scale terrain (multi-chunk-Y) can actually be drawn without truncation.
+    /// RED until `MAX_VBO_BYTES` is raised above 256 MB.
+    #[test]
+    fn vbo_cap_exceeds_legacy_256mb() {
+        assert!(
+            MAX_VBO_BYTES > 256 * 1024 * 1024,
+            "VBO cap {MAX_VBO_BYTES} must exceed the legacy 256 MB limit"
+        );
+    }
 
     #[test]
     fn frustum_culls_behind_camera() {

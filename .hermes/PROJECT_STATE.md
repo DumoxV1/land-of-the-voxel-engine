@@ -102,7 +102,10 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       M4 P1 (BCn+mipmaps) of Fase-3 vertex-AO + schaduw + smooth voxels. Raytracing genoteerd
       als latere fase (zie roadmap — vereist andere pipeline dan huidige mesh-renderer).
 
-27g. ✅ Vertical-scale spike (2026-07-15): zie 27f. Fallout gefixed: 10-min laadtijd +
+27h. ✅ P0 optimalisatie (2026-07-15): VBO-cap 256MB→2GB (TDD spike). `MAX_VBO_BYTES` const
+      + device `required_limits.max_buffer_size` gespiegeld. Geverifieerd: UNIQUE_COLORS
+      3316→6366 (2× variatie), VBO-warn=0, 36/36 groen. Volgende: P1 fBm-profiling,
+      P2 requested_gen-groeiguard (zie docs/OPTIMIZATION_BACKLOG.md).
       VBO-panic. Y-streaming per-kolom gebound (max_cy), UPLOAD_BUDGET 4->64, VBO_BYTES_CAP
       256MB gate in streaming-loop, renderer hard-truncate verts op vbo_capacity (crash-proof).
       Geverifieerd: geen panic, UNIQUE_COLORS=3316, NEAR_WHITE=0.002%, CLEAR=0%, 36/36 groen.

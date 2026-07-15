@@ -6,3 +6,7 @@ Cargo.lock
 
 # Runtime-rapporten (guards schrijven deze elke run)
 .hermes/reports/
+
+# temp logs
+vbo_stderr.log
+*.log

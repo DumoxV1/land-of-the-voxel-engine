@@ -175,7 +175,13 @@ impl ApplicationHandler for App {
         let (device, queue) =
             futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                // P0 spike (2026-07-15): raise the buffer-size limit to 2 GB so the
+                // vertical-scale terrain (multi-chunk-Y) can be drawn without VBO
+                // truncation. Mirrors `voxel_gpu::renderer::MAX_VBO_BYTES`.
+                required_limits: wgpu::Limits {
+                    max_buffer_size: voxel_gpu::renderer::MAX_VBO_BYTES as u64,
+                    ..wgpu::Limits::downlevel_defaults()
+                },
                 memory_hints: wgpu::MemoryHints::default(),
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 label: None,

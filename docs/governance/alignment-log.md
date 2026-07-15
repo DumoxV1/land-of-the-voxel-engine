@@ -2,7 +2,17 @@
 
 Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastgelegd.
 
-## 2026-07-15 — Load-time + VBO-overflow fix (vertical-scale spike fallout)
+## 2026-07-15 — P0 optimalisatie: VBO-cap 256MB → 2GB (TDD spike)
+
+- User: "ga door" met zuivere optimalisatie. P0 = VBO-cap verhogen (snelste winst).
+- Rood→Groen: nieuw `vbo_cap_exceeds_legacy_256mb` test eist `MAX_VBO_BYTES > 256MB`.
+- Implementatie: `const MAX_VBO_BYTES = 2*1024*1024*1024` (module-level, pub) in
+  renderer.rs; device `required_limits.max_buffer_size` gespiegeld (anders blijft
+  device-limit 256MB en truncate alsnog). Renderer gebruikt `MAX_VBO_BYTES.min(device_limit)`.
+- Geverifieerd: spawn eye_y=41.25m, **UNIQUE_COLORS 3316→6366** (2× variatie = meer
+  zichtbare terrain), `VBO budget exceeded`-warn=0, NEAR_WHITE=0.002%, CLEAR=0%.
+  36/36 groen.
+- Volgende in backlog: P1 (fBm-profiling), P2 (requested_gen-groeiguard).
 
 - Fallout van de vertical-scale spike: streamen van Y-lagen 0..=12 vermenigvuldigde de
   chunk-set 13x (576 -> ~6900). Symptomen: (1) **10 min eerste laadtijd** (UPLOAD_BUDGET=4
