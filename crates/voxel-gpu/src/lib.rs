@@ -32,15 +32,76 @@ pub enum WorkerMsg {
     Mesh { coord: ChunkCoord, tris: Vec<Triangle> },
 }
 
+/// Build a single flat quad (2 triangles) impersonating a distant chunk: it sits at the
+/// column's surface height and is coloured by the chunk's dominant (most common) material.
+/// This is the B2 imposter tier — ~2 triangles instead of thousands — and reads as terrain
+/// at distance. The normal points up; AO is neutral so it shades like flat ground.
+///
+/// Height is derived from the chunk itself (highest non-AIR voxel + its slab), so no seed
+/// is needed; the quad lands exactly on the chunk's terrain band.
+pub fn mesh_chunk_imposter(chunk: &Chunk) -> Vec<Triangle> {
+    use voxel_core::coords::{LocalVoxel, CHUNK_SIZE};
+    // Dominant non-AIR material in the chunk (modus over all voxels).
+    let mut counts: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
+    let mut top_y: i32 = -1; // highest non-AIR local voxel y
+    for y in 0..CHUNK_SIZE as u8 {
+        for z in 0..CHUNK_SIZE as u8 {
+            for x in 0..CHUNK_SIZE as u8 {
+                let m = chunk.get(LocalVoxel::new(x, y, z)).0;
+                if m != 0 {
+                    *counts.entry(m).or_insert(0) += 1;
+                    if (y as i32) > top_y {
+                        top_y = y as i32;
+                    }
+                }
+            }
+        }
+    }
+    let dominant = counts
+        .into_iter()
+        .max_by_key(|&(_, c)| c)
+        .map(|(m, _)| voxel_core::palette::MaterialId::from(m))
+        .unwrap_or(voxel_core::palette::MaterialId::from(0u8));
+
+    // Surface height (world meters): chunk slab base + highest solid voxel, in voxel units.
+    let y_vox = if top_y >= 0 {
+        chunk.coord.y * CHUNK_SIZE + top_y as i64
+    } else {
+        chunk.coord.y * CHUNK_SIZE // all-AIR chunk: sit at its base
+    };
+    let y = y_vox as f32 * VOXEL_SIZE_M;
+
+    // Chunk footprint in world meters.
+    let ox = chunk.coord.x as f32 * CHUNK_SIZE as f32 * VOXEL_SIZE_M;
+    let oz = chunk.coord.z as f32 * CHUNK_SIZE as f32 * VOXEL_SIZE_M;
+    let s = CHUNK_SIZE as f32 * VOXEL_SIZE_M; // chunk edge length in meters
+    let (x0, x1) = (ox, ox + s);
+    let (z0, z1) = (oz, oz + s);
+    let up = Vec3::new(0.0, 1.0, 0.0);
+    let mat = dominant;
+    let ao = [1.0f32; 3];
+
+    // Two triangles forming the quad (CCW when viewed from above -> upward normal).
+    let a = Vec3::new(x0, y, z0);
+    let b = Vec3::new(x1, y, z0);
+    let c = Vec3::new(x1, y, z1);
+    let d = Vec3::new(x0, y, z1);
+    let t1 = Triangle { a, b, c, normal: up, material: mat, ao };
+    let t2 = Triangle { a, b: c, c: d, normal: up, material: mat, ao };
+    vec![t1, t2]
+}
+
 /// Convert a chunk-local mesh (vertices in voxel units) into canonical GPU world meters.
 /// `lod` downsamples the chunk before meshing: `Lod::Half` collapses every 2×2×2 voxel
-/// block into a single 2×-scale voxel (distant chunks need far less geometry).
+/// block into a single 2×-scale voxel (distant chunks need far less geometry), and
+/// `Lod::Imposter` collapses the whole chunk into a single flat surface quad (B2).
 pub fn mesh_chunk_world_meters(chunk: &Chunk, lod: crate::chunk_stream::Lod) -> Vec<Triangle> {
-    // A1 (2026-07-15): an all-AIR chunk (every streamed chunk above the surface or below the
-    // bedrock line) meshes to nothing. Skip the full greedy sweep (~196k neighbour probes +
-    // 6 mask allocations per chunk) — the render loop discards an empty mesh anyway.
-    if chunk.is_empty() {
-        return Vec::new();
+    match lod {
+        crate::chunk_stream::Lod::Imposter => {
+            // Imposter: cheap flat quad, no greedy sweep at all.
+            return mesh_chunk_imposter(chunk);
+        }
+        _ => {}
     }
     // LOD: downsample to 2x blocks first, then mesh the coarse chunk at 2x world scale.
     let (mesh_chunk, voxel_scale) = match lod {
@@ -50,6 +111,8 @@ pub fn mesh_chunk_world_meters(chunk: &Chunk, lod: crate::chunk_stream::Lod) -> 
             // Each coarse voxel spans 2 fine voxels = 2 * VOXEL_SIZE_M in world meters.
             (half, VOXEL_SIZE_M * 2.0)
         }
+        // Imposter is handled above (early return); this arm keeps the match exhaustive.
+        crate::chunk_stream::Lod::Imposter => (chunk.clone(), VOXEL_SIZE_M),
     };
     let origin = [
         mesh_chunk.coord.x as f32 * CHUNK_SIZE as f32 * (voxel_scale / VOXEL_SIZE_M),
@@ -361,6 +424,32 @@ mod tests {
             half_max > full_max * 1.5,
             "half-res mesh must be ~2x larger in world meters (full_max={full_max}, half_max={half_max})"
         );
+    }
+
+    #[test]
+    fn imposter_is_single_flat_quad() {
+        // B2: an imposter chunk collapses to exactly 2 triangles (one quad), all at the
+        // same height (flat ground), coloured by the chunk's dominant material. Cheap
+        // stand-in for the far ring vs the full greedy mesh (12+ tris for one voxel).
+        use voxel_core::coords::LocalVoxel;
+        use voxel_core::palette::MaterialId;
+        let coord = ChunkCoord::new(5, 6, 5); // slab 6 -> sits higher than slab 0
+        let mut chunk = Chunk::uniform(coord, MaterialId::from(0u8));
+        chunk.set(LocalVoxel::new(0, 0, 0), MaterialId::from(3u8));
+        let imp = mesh_chunk_imposter(&chunk);
+        assert_eq!(imp.len(), 2, "imposter = single flat quad (2 tris)");
+        // All four corners share the same Y (flat), and Y reflects the chunk slab + voxel.
+        let y0 = imp[0].a.y;
+        for t in &imp {
+            assert_eq!(t.a.y, y0);
+            assert_eq!(t.b.y, y0);
+            assert_eq!(t.c.y, y0);
+            assert_eq!(t.material, MaterialId::from(3u8), "imposter uses dominant material");
+            assert_eq!(t.normal, Vec3::new(0.0, 1.0, 0.0), "imposter normal points up");
+        }
+        // Y must equal (slab*32 + 0) * VOXEL_SIZE_M (the single voxel at local y=0).
+        let expected_y = (coord.y * 32) as f32 * VOXEL_SIZE_M;
+        assert!((y0 - expected_y).abs() < 1e-3, "imposter height = chunk surface (got {y0}, want {expected_y})");
     }
 
     /// Movement must be frame-rate independent: the same key held for the same wall-clock

@@ -46,14 +46,19 @@ pub enum Lod {
     Full,
     /// Half resolution: voxels are 2×2×2 blocks (far field). ~8× fewer triangles.
     Half,
+    /// Imposter: a single flat quad at the column's surface height, coloured by the
+    /// dominant material. The cheapest tier (2 triangles/chunk) for the far ring — a
+    /// "billboard" that reads as terrain at distance without any real geometry. (B2.)
+    Imposter,
 }
 
 impl Lod {
-    /// Voxel downsample factor (1 = full, 2 = half).
+    /// Voxel downsample factor (1 = full, 2 = half). Imposter is a degenerate quad.
     pub fn factor(&self) -> i64 {
         match self {
             Lod::Full => 1,
             Lod::Half => 2,
+            Lod::Imposter => 1,
         }
     }
 }
@@ -182,6 +187,8 @@ pub struct StreamConfig {
     pub requests_per_frame: usize,
     /// Chunks beyond this chebyshev distance use Lod::Half.
     pub lod_half_radius: i64,
+    /// Chunks beyond this chebyshev distance use Lod::Imposter (single flat quad). (B2.)
+    pub lod_imposter_radius: i64,
     /// Extra slabs kept above the surface height (cull margin).
     pub air_margin: i64,
 }
@@ -193,6 +200,7 @@ impl Default for StreamConfig {
             max_y: 12,
             requests_per_frame: 4,
             lod_half_radius: 8,
+            lod_imposter_radius: 11,
             air_margin: 1,
         }
     }
@@ -287,7 +295,9 @@ impl ChunkScheduler {
                 .min(self.cfg.max_y)
                 .max(0);
             let cheb = ((cx - ccx).unsigned_abs().max((cz - ccz).unsigned_abs())) as i64;
-            let lod = if cheb >= self.cfg.lod_half_radius {
+            let lod = if cheb >= self.cfg.lod_imposter_radius {
+                Lod::Imposter
+            } else if cheb >= self.cfg.lod_half_radius {
                 Lod::Half
             } else {
                 Lod::Full
@@ -334,6 +344,7 @@ mod tests {
             max_y: 12,
             requests_per_frame: 2,
             lod_half_radius: 8,
+            lod_imposter_radius: 8,
             air_margin: 0,
         };
         let mut s = ChunkScheduler::new(cfg);
@@ -364,28 +375,33 @@ mod tests {
     }
 
     #[test]
-    fn lod_assigned_by_ring() {
+    fn lod_assigned_three_tiers() {
         let cfg = StreamConfig {
             view_radius: 12,
             max_y: 12,
             requests_per_frame: 5000,
             lod_half_radius: 4,
+            lod_imposter_radius: 8,
             air_margin: 0,
         };
         let mut s = ChunkScheduler::new(cfg);
         let mut hh = hc();
         let jobs = s.plan(0, 0, 0, &mut hh, 1, |_| false);
-        // Near column (0,0) must be Full; far column (10,0) must be Half.
         let near = jobs
             .iter()
             .find(|j| j.coord.x == 0 && j.coord.z == 0)
             .expect("near column planned");
         assert_eq!(near.lod, Lod::Full, "near field must be full res");
+        let mid = jobs
+            .iter()
+            .find(|j| j.coord.x == 6 && j.coord.z == 0)
+            .expect("mid column planned");
+        assert_eq!(mid.lod, Lod::Half, "mid ring must be half res");
         let far = jobs
             .iter()
-            .find(|j| j.coord.x == 10 && j.coord.z == 0)
+            .find(|j| j.coord.x == 11 && j.coord.z == 0)
             .expect("far column planned");
-        assert_eq!(far.lod, Lod::Half, "far ring must be half res");
+        assert_eq!(far.lod, Lod::Imposter, "far ring must be imposter");
     }
 
     #[test]
@@ -400,6 +416,7 @@ mod tests {
             max_y: 4,
             requests_per_frame: 1000,
             lod_half_radius: 8,
+            lod_imposter_radius: 8,
             air_margin: 0,
         };
         let mut s = ChunkScheduler::new(cfg);

@@ -217,6 +217,7 @@ impl Default for App {
                     max_y: 12,
                     requests_per_frame: 4,
                     lod_half_radius: 8,
+                    lod_imposter_radius: 11,
                     air_margin: 1,
                 },
             ),
