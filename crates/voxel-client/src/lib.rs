@@ -233,7 +233,10 @@ impl Default for App {
                     max_y: 12,
                     requests_per_frame: 4,
                     lod_half_radius: 8,
-                    lod_imposter_radius: 11,
+                    // Imposter tier disabled: set == view_radius so no loaded chunk uses
+                    // it. Isolated flat imposter quads read as squares floating in the sky
+                    // from high altitude; the far ring falls back to Half (connected mesh).
+                    lod_imposter_radius: VIEW_RADIUS as i64,
                     air_margin: 1,
                 },
             ),
