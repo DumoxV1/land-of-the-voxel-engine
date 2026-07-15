@@ -80,8 +80,10 @@ solid ⟺ density > 0  EN  NOT cave(x,y,z)
   niet als AIR die wegvallen).
 - **`CAVE_BAND_DEPTH=96` vox (~12 m)**, `CAVE_THRESH=0.5` op `fbm3` (één breed octaaf, 96 vox
   periode → 12 m-grotnetwerken). Top-3 voxels onder surface nooit cave (vloer blijft intact).
-- **Nieuw:** `fbm3` + `hash3` (8-hoek trilineaire value-noise in 3D), `OVERHANG_AMP_VOX=6`
-  (~0,75 m richels), `MAX_SOLID_M` (surface+overhang bound voor de air-chunk early-out).
+- **Nieuw:** `fbm3` + `hash3` (8-hoek trilineaire value-noise in 3D), `OVERHANG_AMP_VOX=28`
+  (~3,5 m richels/kliffen, verhoogd van 6 op 2026-07-15 voor zichtbare variatie),
+  `OVERHANG_OCTAVES` = 2 octaven (128 vox @0,7 + 48 vox @0,3) voor gevarieerde overhangs,
+  `MAX_SOLID_M` (surface+overhang bound voor de air-chunk early-out).
 - **Tests:** nieuwe `terrain_has_caves_and_overhangs` (Rood→Groen); 5 bestaande aangepast
   aan de solid-body. **19/19 worldgen groen**, workspace 36/36 binaries, 28/28 GPU-lib
   (zonlicht) onaangetast. Ad-hoc kwantificatie: 16/64 sample-kolommen hebben caves,

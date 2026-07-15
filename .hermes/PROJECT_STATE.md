@@ -211,6 +211,16 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       top=216 vox (~27 m). Run voor visuele check:
       `cargo run --release --example gpu_window_main -p voxel-client`.
 
+27p. ✅ **TERRAIN 2.0 — OVERHANG-AMPLITUDE VERGROOT (2026-07-15, autonome keuze optie A):**
+      gebruiker gaf volmacht ("doe wat jij goed vind, autonoom"). `OVERHANG_AMP_VOX` 6→28
+      (~3,5 m richels/kliffen), `OVERHANG_AMP_CEIL` 6→28, en `OVERHANG_OCTAVES` van 1 breed
+      octaaf naar 2 (128 vox @0,7 + 48 vox @0,3) voor gevarieerde overhangs in plaats van één
+      vlakke slab. Walkability + grass-cap blijven intact (alleen-omhoog-warp, surface-term
+      domineert bij y≈surface). `max_surface_bound_covers_real_terrain` test-bound 6→28 vox.
+      **19/19 worldgen groen**, workspace 36/36, 28/28 GPU-lib onaangetast. Ad-hoc verificatie
+      (24×24, seed 7): **409/576 kolommen overhang** (was ~3%), **166/576 cave** → wereld is nu
+      rijk aan richels/kliffen + grotten. Release `gpu_window_main` herbouwd.
+
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
 
 ## Actieve automatisering

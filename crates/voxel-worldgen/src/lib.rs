@@ -49,19 +49,22 @@ const MAX_SOLID_M: f32 =
 /// This keeps the walkable ground (the heightfield) intact while adding real caves/overhangs
 /// that the Stap-3 sunlight BFS then shadows correctly.
 
-/// Max overhang bulge in VOXELS (±0.75 m). Small so the walkable surface is untouched and
-/// `MAX_SURFACE_M`'s margin still covers the tallest overhang.
-const OVERHANG_AMP_VOX: f32 = 6.0;
+/// Max overhang bulge in VOXELS (~3.5 m). Large enough to produce visible cliffs/ledges,
+/// small enough that the walkable surface is untouched and `MAX_SURFACE_M`'s +4 m margin
+/// still covers the tallest overhang voxel.
+const OVERHANG_AMP_VOX: f32 = 28.0;
 /// Ceil of the overhang amplitude in voxels, used to widen the streaming Y-envelope.
-const OVERHANG_AMP_CEIL: i64 = 6;
+const OVERHANG_AMP_CEIL: i64 = 28;
 /// Depth below the surface (voxels) within which caves may be carved. Bounds the solid
 /// "slab" so flying beneath the world still shows the underside of a thin shell, and the
 /// streaming range stays tight (no bottomless stone fill).
 const CAVE_BAND_DEPTH: i64 = 96; // ~12 m: caves span a few Y-chunks below the surface
 /// Cave-noise threshold in [-1,1]: voxels ABOVE this (sparse) become air tunnels.
 const CAVE_THRESH: f32 = 0.5;
-/// Overhang warp octaves (voxels): one broad octave → large gentle ledges.
-const OVERHANG_OCTAVES: &[(i64, f32)] = &[(128, 1.0)];
+/// Overhang warp octaves (voxels): a broad octave (~16 m) for large cliffs + a medium one
+/// (~6 m) for smaller ledges. Two octaves give varied, natural overhangs instead of one
+/// uniform slab. Both are value-noise (seamless across chunks).
+const OVERHANG_OCTAVES: &[(i64, f32)] = &[(128, 0.7), (48, 0.3)];
 /// Cave tunnel octaves (voxels): one broad octave → 12 m-scale cave networks.
 const CAVE_OCTAVES: &[(i64, f32)] = &[(96, 1.0)];
 
@@ -891,7 +894,7 @@ mod tests {
             observed_max = observed_max.max(surface_height_m(x, z, seed));
         }
         assert!(
-            observed_max < MAX_SURFACE_M + (6.0 * voxel_core::coords::VOXEL_SIZE_M),
+            observed_max < MAX_SURFACE_M + (28.0 * voxel_core::coords::VOXEL_SIZE_M),
             "MAX_SURFACE_M (...
              — the air-chunk early-out would clip terrain otherwise"
         );
