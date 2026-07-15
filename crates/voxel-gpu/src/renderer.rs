@@ -941,8 +941,14 @@ mod tests {
             let mut scene = GpuScene::new_offscreen(64, 64).await.expect("gpu scene");
             scene.resize(96, 80);
             assert_eq!(scene.size(), (96, 80));
-            let chunk =
-                voxel_worldgen::generate_chunk(voxel_core::coords::ChunkCoord::new(0, 0, 0), 7);
+            let chunk = {
+                let cx = 0i64;
+                let cz = 0i64;
+                let cy = (voxel_worldgen::surface_height_m(cx * 32 + 16, cz * 32 + 16, 7)
+                    / voxel_core::coords::VOXEL_SIZE_M) as i64
+                    / 32;
+                voxel_worldgen::generate_chunk(voxel_core::coords::ChunkCoord::new(cx, cy, cz), 7)
+            };
             let tris = crate::mesh_chunk_world_meters(&chunk);
             let cam = GpuCamera::new(
                 [2.0, 4.0, 6.0],
@@ -1077,11 +1083,43 @@ fn sample_albedo(id: u32, p: vec3<f32>, n: vec3<f32>, tiling: f32) -> vec3<f32> 
 fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     let m = materials[in.material];
     let n = normalize(in.normal);
-    let albedo = sample_albedo(in.material, in.world_pos, n, m.params.x) * m.albedo_tint.rgb;
-    let L = normalize(vec3<f32>(0.4, 0.9, 0.3));
+    var albedo = sample_albedo(in.material, in.world_pos, n, m.params.x) * m.albedo_tint.rgb;
+
+    // --- Filmische kleurvariatie (Lay of the Land-stijl), per-fragment op world_pos. ---
+    // Goedkope waarde-ruis voor subtiele per-voxel jitter (breekt het 'plastic' effekt).
+    let p = in.world_pos;
+    let h = fract(sin(dot(floor(p * 4.0), vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
+    let jitter = 0.88 + 0.24 * h;            // 0.88..1.12 licht/helderheid jitter
+    albedo *= jitter;
+
+    // Zachte hoogte/helling banding (Lay of the Land-stijl): groen laag, steen op steile
+    // hellingen, sneeuw boven de boomgrens. Wereld-pos in meters (mesh is in meters).
+    let slope = 1.0 - abs(n.y);                 // 0 vlak, 1 verticaal
+    let sky = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+    let rock = vec3<f32>(0.45, 0.45, 0.48);
+    let snow = vec3<f32>(0.93, 0.95, 0.98);
+    // Rots verschijnt op steile hellingen; sneeuw boven ~26 m wereld-hoogte.
+    let rock_mix = smoothstep(0.35, 0.75, slope) * 0.6;
+    let snow_mix = smoothstep(24.0, 30.0, p.y) * (1.0 - slope * 0.5);
+    albedo = mix(albedo, rock, rock_mix);
+    albedo = mix(albedo, snow, snow_mix);
+    // Toon-map naar warme, filmische saturatie.
+    albedo = pow(albedo, vec3<f32>(0.85, 0.9, 0.95));
+
+    // --- Zachte hemel-lighting i.p.v. harde directional (filmischer, LoL-achtig). ---
+    let sky_tint = vec3<f32>(0.62, 0.74, 0.92);   // koel zonlicht/hemel
+    let ground_tint = vec3<f32>(0.35, 0.28, 0.22); // warme bounce vanonder
+    let hemi = sky_tint * sky + ground_tint * (1.0 - sky);
+    let ambient = 0.35;
+    // Zachte key-light voor vorm, geen harde schaduwranden.
+    let L = normalize(vec3<f32>(0.35, 0.85, 0.28));
     let diff = max(dot(n, L), 0.0);
-    let ambient = 0.45;
-    var col = albedo * (ambient + 0.75 * diff) + m.emissive.rgb;
+    // Crevice-AO: donkere nagels in holtes/naadjes via dezelfde ruis (verschoven).
+    let ao = 0.75 + 0.25 * fract(sin(dot(floor(p * 2.0 + 7.0), vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
+
+    var col = albedo * (hemi * (ambient + 0.55) + vec3<f32>(1.0, 0.96, 0.88) * 0.35 * diff) * ao;
+    col += m.emissive.rgb;
+
     let dist = length(in.world_pos - cam.eye_pos.xyz);
     let fog = 1.0 - exp(-cam.params.x * dist);
     col = mix(col, cam.fog_color.xyz, clamp(fog, 0.0, 0.85));
