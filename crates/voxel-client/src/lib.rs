@@ -266,7 +266,7 @@ impl Default for App {
             pitch: -0.4,
             dragging: false,
             last_mouse: None,
-            max_dim: 8192,
+            max_dim: 2048, // overwritten at scene init from adapter.limits()
             surf_w: 1280,
             surf_h: 800,
             last_frame: std::time::Instant::now(),
@@ -319,12 +319,17 @@ impl ApplicationHandler for App {
         let (device, queue) =
             futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 required_features: wgpu::Features::empty(),
-                // P0 spike (2026-07-15): raise the buffer-size limit to 2 GB so the
-                // vertical-scale terrain (multi-chunk-Y) can be drawn without VBO
-                // truncation. Mirrors `voxel_gpu::renderer::MAX_VBO_BYTES`.
+                // Limits: take the adapter's real capabilities as the base (so texture
+                // dimensions match what the GPU actually supports), then raise the buffer
+                // size to 2 GB so vertical-scale terrain can be drawn without VBO truncation.
+                // P0 spike (2026-07-15): previously downlevel_defaults() forced a 2048px
+                // texture cap, which crashed at fullscreen (2240px) and clipped the surface.
                 required_limits: wgpu::Limits {
                     max_buffer_size: voxel_gpu::renderer::MAX_VBO_BYTES as u64,
-                    ..wgpu::Limits::downlevel_defaults()
+                    max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+                    max_texture_dimension_1d: adapter.limits().max_texture_dimension_1d,
+                    max_texture_dimension_3d: adapter.limits().max_texture_dimension_3d,
+                    ..wgpu::Limits::default()
                 },
                 memory_hints: wgpu::MemoryHints::default(),
                 experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -343,8 +348,10 @@ impl ApplicationHandler for App {
             .find(|f| f.is_srgb())
             .unwrap_or(capabilities.formats[0]);
 
-        // Clip the surface size to a safe maximum (DPI scaling can push past the adapter limit).
-        let max_dim: u32 = 8192;
+        // Clip the surface size to the adapter's real texture limit (never exceed what the
+        // GPU supports — the depth texture is created at exactly surf_w x surf_h, so going
+        // past max_texture_dimension_2d makes device.create_texture fatal).
+        let max_dim: u32 = adapter.limits().max_texture_dimension_2d;
         let surf_w = size.width.min(max_dim);
         let surf_h = size.height.min(max_dim);
         self.max_dim = max_dim;
