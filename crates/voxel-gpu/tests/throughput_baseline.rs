@@ -33,3 +33,45 @@ fn throughput_baseline() {
     // future optimizations can be proven and regressions caught.
     assert!(per < 25.0, "chunk gen+mesh too slow: {per:.2} ms/chunk (want < 25)");
 }
+
+/// A1+A2 win measurement (2026-07-15). Streams a realistic client view-volume — a disk of
+/// columns, each streaming Y-layers 0..=14 (like the live client) — and reports gen+mesh
+/// throughput plus the air-chunk fraction that now takes the O(1) / mesh-skip fast paths.
+/// Ignored by default (timing bench); run explicitly:
+///   cargo test -p voxel-gpu stream_volume_bench --release -- --ignored --nocapture
+#[test]
+#[ignore]
+fn stream_volume_bench() {
+    let seed = 7u32;
+    let radius = 48i64; // ~192 m view radius (matches T9)
+    let max_cy = 14i64;
+    let mut chunks = 0usize;
+    let mut air = 0usize;
+    let mut total_tris = 0usize;
+    let t0 = std::time::Instant::now();
+    for cx in -radius..=radius {
+        for cz in -radius..=radius {
+            if cx * cx + cz * cz > radius * radius {
+                continue; // radial cull (disk)
+            }
+            for cy in 0..=max_cy {
+                let c = generate_chunk(ChunkCoord::new(cx, cy, cz), seed);
+                let tris = mesh_chunk_world_meters(&c);
+                if tris.is_empty() {
+                    air += 1;
+                }
+                total_tris += tris.len();
+                chunks += 1;
+            }
+        }
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "STREAM_VOLUME: {chunks} chunks ({}% air) in {:.1} ms = {:.4} ms/chunk, {:.0} chunks/s, {} tris",
+        air * 100 / chunks.max(1),
+        ms,
+        ms / chunks as f64,
+        chunks as f64 / (ms / 1000.0),
+        total_tris,
+    );
+}

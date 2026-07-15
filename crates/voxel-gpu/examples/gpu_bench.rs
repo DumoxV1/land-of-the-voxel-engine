@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use voxel_core::coords::ChunkCoord;
+use voxel_core::coords::{CHUNK_SIZE as CHUNK_SIZE_I, VOXEL_SIZE_M};
 use voxel_gpu::renderer::{Frustum, GpuCamera, GpuScene};
 use voxel_gpu::mesh_chunk_world_meters;
 use voxel_mesher::Triangle;
@@ -64,8 +65,15 @@ fn main() {
             (side / 2).max(1).min(side - 1)
         };
         let mid = anchor_cx as f32 * CHUNK_M;
-        // Spawn-hoogte zoals de client: terrain-top (28 voxels) + 3 clearance, * 0.125.
-        let eye_y = (28 + 3) as f32 * 0.125;
+        // Spawn-hoogte zoals de client: echte surface-hoogte op de anchor-kolom (de fBm-lift
+        // tilde de surface naar tientallen meters; de oude hard-coded 28 vox = 3,5 m keek
+        // sinds dien onder de grond → 0 zichtbare chunks). +12 vox (~1,5 m) oogclearance.
+        let anchor_wx = anchor_cx * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
+        let surf_vox =
+            (voxel_worldgen::surface_height_m(anchor_wx, anchor_wx, 7) / VOXEL_SIZE_M) as i64;
+        let eye_y = (surf_vox + 12) as f32 * VOXEL_SIZE_M;
+        // Y-lagen die we streamen (chunk = 4 m; surface tot ~123 m → cy tot ~31).
+        let max_cy = (surf_vox / CHUNK_SIZE_I) + 2;
         let mut cam = GpuCamera::new(
             [mid, eye_y, mid],
             -std::f32::consts::FRAC_PI_2,
@@ -89,7 +97,6 @@ fn main() {
             let ccx = (ex / CHUNK_M).floor() as i64;
             let ccz = (ez / CHUNK_M).floor() as i64;
             let half = CHUNK_M * 0.5;
-            let half_y = CHUNK_M * 1.5;
 
             let mut visible: Vec<Triangle> = Vec::new();
             for dx in -radius..=radius {
@@ -99,23 +106,27 @@ fn main() {
                     if cx < 0 || cz < 0 || cx >= side || cz >= side {
                         continue;
                     }
-                    let coord = ChunkCoord::new(cx, 0, cz);
-                    // Frustum-culling, identiek aan de client.
-                    if !frustum.intersects_aabb(
-                        [
-                            (cx as f32 + 0.5) * CHUNK_M,
-                            half_y,
-                            (cz as f32 + 0.5) * CHUNK_M,
-                        ],
-                        half,
-                    ) {
-                        continue;
+                    // Stream the vertical column of chunks (cy 0..=max_cy), like the client.
+                    // The A2 early-out makes the above-surface / below-bedrock cy's near-free.
+                    for cy in 0..=max_cy {
+                        let coord = ChunkCoord::new(cx, cy, cz);
+                        // Frustum-culling per chunk (AABB centred on this cy slab).
+                        if !frustum.intersects_aabb(
+                            [
+                                (cx as f32 + 0.5) * CHUNK_M,
+                                (cy as f32 + 0.5) * CHUNK_M,
+                                (cz as f32 + 0.5) * CHUNK_M,
+                            ],
+                            half,
+                        ) {
+                            continue;
+                        }
+                        let entry = mesh_cache.entry(coord).or_insert_with(|| {
+                            let chunk = world.get_or_generate(coord);
+                            mesh_chunk_world_meters(&chunk)
+                        });
+                        visible.extend_from_slice(entry);
                     }
-                    let entry = mesh_cache.entry(coord).or_insert_with(|| {
-                        let chunk = world.get_or_generate(coord);
-                        mesh_chunk_world_meters(&chunk)
-                    });
-                    visible.extend_from_slice(entry);
                 }
             }
             total_visible += visible.len();

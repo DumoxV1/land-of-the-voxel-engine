@@ -27,6 +27,12 @@ pub struct MeshResult {
 
 /// Convert a chunk-local mesh (vertices in voxel units) into canonical GPU world meters.
 pub fn mesh_chunk_world_meters(chunk: &Chunk) -> Vec<Triangle> {
+    // A1 (2026-07-15): an all-AIR chunk (every streamed chunk above the surface or below the
+    // bedrock line) meshes to nothing. Skip the full greedy sweep (~196k neighbour probes +
+    // 6 mask allocations per chunk) — the render loop discards an empty mesh anyway.
+    if chunk.is_empty() {
+        return Vec::new();
+    }
     let origin = [
         chunk.coord.x as f32 * CHUNK_SIZE as f32,
         chunk.coord.y as f32 * CHUNK_SIZE as f32,

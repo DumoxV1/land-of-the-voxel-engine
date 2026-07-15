@@ -75,6 +75,29 @@ impl Chunk {
         self.state
     }
 
+    /// True when every voxel in the chunk is AIR (material id 0).
+    ///
+    /// O(1) for the common `Uniform` case (a freshly generated above-surface / below-bedrock
+    /// chunk stays uniform-AIR), so callers can cheaply skip meshing an empty chunk instead
+    /// of running the full greedy sweep (~196k neighbour probes) only to emit zero triangles.
+    /// A palette-packed or dense chunk only exists after a non-AIR `set`, so in practice it is
+    /// never empty; the exhaustive scan below keeps the predicate correct regardless.
+    pub fn is_empty(&self) -> bool {
+        match self.state {
+            ChunkState::Uniform => self.uniform == MaterialId::from(0u8),
+            ChunkState::PalettePacked => self
+                .palette
+                .as_ref()
+                .map(|p| p.iter().all(|m| *m == MaterialId::from(0u8)))
+                .unwrap_or(true),
+            ChunkState::Dense => self
+                .dense
+                .as_ref()
+                .map(|d| d.iter().all(|m| *m == MaterialId::from(0u8)))
+                .unwrap_or(true),
+        }
+    }
+
     pub fn get(&self, local: LocalVoxel) -> MaterialId {
         match self.state {
             ChunkState::Uniform => self.uniform,
@@ -186,6 +209,33 @@ impl Chunk {
         self.palette = None;
         self.packed = None;
         self.dense = Some(dense);
+    }
+}
+
+#[cfg(test)]
+mod is_empty_tests {
+    use super::*;
+
+    #[test]
+    fn uniform_air_chunk_is_empty() {
+        let c = Chunk::uniform(ChunkCoord::new(0, 0, 0), MaterialId::from(0u8));
+        assert!(c.is_empty(), "uniform-AIR chunk must report empty");
+    }
+
+    #[test]
+    fn uniform_solid_chunk_is_not_empty() {
+        let c = Chunk::uniform(ChunkCoord::new(0, 0, 0), MaterialId::from(3u8));
+        assert!(!c.is_empty(), "uniform-STONE chunk must not report empty");
+    }
+
+    #[test]
+    fn chunk_with_one_solid_voxel_is_not_empty() {
+        let mut c = Chunk::uniform(ChunkCoord::new(0, 0, 0), MaterialId::from(0u8));
+        c.set(LocalVoxel::new(1, 2, 3), MaterialId::from(2u8));
+        assert!(
+            !c.is_empty(),
+            "chunk with a single solid voxel must not report empty"
+        );
     }
 }
 

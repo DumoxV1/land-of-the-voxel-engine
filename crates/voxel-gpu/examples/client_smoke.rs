@@ -1,53 +1,48 @@
 //! Headless smoke test for the live-streaming first-person path used by `gpu_window`.
-//! No winit window: drives the same chunk-streaming + mesh + render_to_view
-//! logic that the window client uses, with a walking camera, to prove it runs
-//! on the 12.5 cm scale (S-13) without panic and yields visible triangles.
+//! No winit window: drives the same chunk-streaming + mesh + render logic that the
+//! window client uses, with a walking camera, to prove it runs on the 12.5 cm scale
+//! (S-13) without panic and yields visible triangles.
+//!
+//! Kept in sync with the real client (2026-07-15): targets the SURFACE chunk column
+//! (surface is tens of metres up since the fBm lift + BEDROCK truncation, so the old
+//! hard-coded `cy=0` streamed only empty below-bedrock chunks → 0 tris). Uses
+//! `mesh_chunk_world_meters` (canonical world-meter meshes) exactly like `spawn_mesh`,
+//! so it also exercises the A1 empty-chunk mesh-skip + A2 gen early-out fast paths.
 //!
 //! Run: cargo run --release --example client_smoke -p voxel-gpu
 
 use std::collections::HashMap;
-use voxel_core::coords::{ChunkCoord, CHUNK_SIZE};
+use voxel_core::coords::{ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M};
 use voxel_gpu::renderer::{GpuCamera, GpuScene};
-use voxel_mesher::greedy_mesh;
+use voxel_gpu::{mesh_chunk_world_meters, spawn_eye_y_m};
 use voxel_mesher::Triangle;
-use voxel_world::World;
+use voxel_worldgen::surface_height_m;
 
-const CHUNK_M: f32 = CHUNK_SIZE as f32 * 0.125; // 4 m (ADR-0005)
+const CHUNK_M: f32 = CHUNK_SIZE as f32 * VOXEL_SIZE_M; // 4 m (ADR-0005)
 const VIEW_RADIUS: i64 = 16;
+const MAX_CY: i64 = 14; // stream Y-layers 0..=14 per column (like the live client)
+const SEED: u32 = 7;
 
 fn main() {
     futures::executor::block_on(async {
-        let mut world = World::new(7);
-        let mut scene = GpuScene::new_offscreen(1024, 768)
-            .await
-            .expect("gpu scene");
+        let mut scene = GpuScene::new_offscreen(1024, 768).await.expect("gpu scene");
         let mut cache: HashMap<ChunkCoord, Vec<Triangle>> = HashMap::new();
 
-        // First-person spawn: eye a bit above the spawn-chunk terrain.
-        let spawn = ChunkCoord::new(1, 0, 1);
-        let chunk = world.get_or_generate(spawn);
-        let mut top = 0i64;
-        for lx in 0..CHUNK_SIZE as u8 {
-            for lz in 0..CHUNK_SIZE as u8 {
-                for ly in (0..CHUNK_SIZE as u8).rev() {
-                    if chunk
-                        .get(voxel_core::coords::LocalVoxel::new(lx, ly, lz))
-                        .0
-                        != 0
-                    {
-                        if (ly as i64) > top {
-                            top = ly as i64;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        let eye_y = (top + 3) as f32; // 3 voxels above surface
-        println!("spawn terrain top = {top} voxels (~{:.2} m), eye_y = {:.2} m", top as f32 * 0.125, eye_y * 0.125);
+        // First-person spawn: eye a bit above the spawn-column's real surface height.
+        let spawn_cx = 1i64;
+        let spawn_cz = 1i64;
+        let col_wx = spawn_cx * CHUNK_SIZE + CHUNK_SIZE / 2;
+        let col_wz = spawn_cz * CHUNK_SIZE + CHUNK_SIZE / 2;
+        let top_vox = (surface_height_m(col_wx, col_wz, SEED) / VOXEL_SIZE_M) as i64;
+        let eye_y_m = spawn_eye_y_m(top_vox, 12); // ~1.5 m of clearance
+        println!(
+            "spawn terrain top = {top_vox} voxels (~{:.2} m), eye_y = {:.2} m",
+            top_vox as f32 * VOXEL_SIZE_M,
+            eye_y_m
+        );
 
         let mut cam = GpuCamera::new(
-            [1.5 * CHUNK_M, eye_y, 1.5 * CHUNK_M],
+            [1.5 * CHUNK_M, eye_y_m, 1.5 * CHUNK_M],
             -std::f32::consts::FRAC_PI_2,
             -0.4,
             1024.0 / 768.0,
@@ -55,9 +50,9 @@ fn main() {
 
         let mut total = 0usize;
         let frames = 120;
-        for f in 0..frames {
+        for _f in 0..frames {
             // Walk forward (in +X) like a player moving through the world.
-            cam.eye[0] += 8.0 * 0.125; // ~1 m/s in voxels
+            cam.eye[0] += 8.0 * VOXEL_SIZE_M; // ~1 m/frame in world meters
             let [ex, _ey, ez] = cam.eye;
             let ccx = (ex / CHUNK_M).floor() as i64;
             let ccz = (ez / CHUNK_M).floor() as i64;
@@ -66,15 +61,14 @@ fn main() {
                 for dz in -VIEW_RADIUS..=VIEW_RADIUS {
                     let cx = ccx + dx;
                     let cz = ccz + dz;
-                    if cx < 0 || cz < 0 {
-                        continue;
+                    for cy in 0..=MAX_CY {
+                        let coord = ChunkCoord::new(cx, cy, cz);
+                        let entry = cache.entry(coord).or_insert_with(|| {
+                            let c = voxel_worldgen::generate_chunk(coord, SEED);
+                            mesh_chunk_world_meters(&c)
+                        });
+                        tris.extend_from_slice(entry);
                     }
-                    let coord = ChunkCoord::new(cx, 0, cz);
-                    let entry = cache.entry(coord).or_insert_with(|| {
-                        let c = world.get_or_generate(coord);
-                        greedy_mesh(&c)
-                    });
-                    tris.extend_from_slice(entry);
                 }
             }
             if tris.is_empty() {
@@ -84,6 +78,10 @@ fn main() {
                 total += 1;
             }
         }
+        assert!(
+            total > 0,
+            "client streaming path rendered 0 frames — surface chunks produced no triangles"
+        );
         println!("smoke OK: rendered {total}/{frames} frames (12.5 cm streaming path), no panic");
     });
 }

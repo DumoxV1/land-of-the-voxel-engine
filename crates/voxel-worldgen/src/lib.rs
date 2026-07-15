@@ -25,6 +25,13 @@ const SNOW: u8 = 8;
 /// enough collision footing, halves+ gen cost on deep chunks.
 const BEDROCK_DEPTH: i64 = 8;
 
+/// Hard upper bound on `surface_height_m` in **meters**, used by the O(1) air-chunk early-out
+/// in `generate_chunk`. `surface_height_m = base + mid + micro` where each term is a
+/// `(fbm*0.5+0.5)` value in [0,1) times its amplitude: base ≤ 60 m, mid ≤ 40·max_roughness
+/// (roughness ≤ 1.4 → 56 m), micro ≤ 3 m → ≤ 119 m. A +4 m margin keeps the bound safe if the
+/// amplitude constants shift. MUST stay ≥ the true supremum or the early-out would clip terrain.
+const MAX_SURFACE_M: f32 = 60.0 + 40.0 * 1.4 + 3.0 + 4.0; // 123 m
+
 /// Generate a deterministic chunk for the given coord + seed.
 ///
 /// The terrain height is a pure function of world X/Z (fBm), so adjacent chunks form
@@ -35,11 +42,21 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
     let mut chunk = Chunk::uniform(coord, MaterialId::from(AIR));
     let origin = coord.world_voxel(LocalVoxel::new(0, 0, 0)); // world pos of chunk (0,0,0)
 
+    let n = SIZE as i64;
+
+    // A2 fast path (2026-07-15): O(1) whole-chunk AIR early-out with ZERO fBm work.
+    // `surface_height_m` is bounded above by its component maxima (base 60 m + mid
+    // 40·max_roughness + micro 3 m). Any chunk whose lowest voxel sits above that ceiling is
+    // guaranteed all-AIR, so we skip building the (n+2)² height buffer entirely. This is the
+    // hot case: the client streams a tall column of Y-layers, most of which are empty sky.
+    if origin.y as f32 * voxel_core::coords::VOXEL_SIZE_M > MAX_SURFACE_M {
+        return chunk;
+    }
+
     // Precompute the surface-height field for this chunk's columns PLUS a 1-voxel border
     // ring on every side (so slope at chunk edges samples the neighbouring chunk's columns
     // without re-evaluating fBm per ly). Buffer is (n+2)^2 with a +1 index offset so that
     // lx-1 / lz-1 (which reach into the neighbour chunk) stay in bounds.
-    let n = SIZE as i64;
     let stride = (n + 2) as usize;
     let mut hbuf = vec![0.0f32; stride * stride];
     for lx in -1..=n {
@@ -54,6 +71,33 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
         let idx = ((lx + 1) as usize) * stride + ((lz + 1) as usize);
         (hbuf[idx] / voxel_core::coords::VOXEL_SIZE_M) as i64
     };
+
+    // A2 (2026-07-15): whole-chunk AIR early-out. Compute the surface-height envelope over
+    // THIS chunk's columns; if the chunk's world-Y span lies entirely above every column's
+    // surface (nothing to fill) or entirely below every column's bedrock floor, every voxel
+    // is AIR. Return the uniform-AIR chunk without running the per-column biome/local fBm
+    // (~11 fBm evaluations/column × 1024 columns) or the classify loop. The client streams
+    // Y-layers 0..=12 per column, so most streamed chunks are pure air above/below the thin
+    // surface shell — this skips their generation cost entirely.
+    let mut max_h = i64::MIN;
+    let mut min_floor = i64::MAX;
+    for lx in 0..n {
+        for lz in 0..n {
+            let h = h_vox(lx, lz);
+            if h > max_h {
+                max_h = h;
+            }
+            let floor_wy = (h - BEDROCK_DEPTH).max(0);
+            if floor_wy < min_floor {
+                min_floor = floor_wy;
+            }
+        }
+    }
+    let chunk_lo = origin.y;
+    let chunk_hi = origin.y + n - 1;
+    if chunk_lo > max_h || chunk_hi < min_floor {
+        return chunk; // entirely above surface or below bedrock → all AIR
+    }
 
     for lx in 0..SIZE as u8 {
         for lz in 0..SIZE as u8 {
@@ -538,6 +582,52 @@ mod tests {
         assert!(
             chunk_has_any_solid(&surface),
             "surface chunk must still contain terrain"
+        );
+    }
+
+    /// A2 safety (2026-07-15): the O(1) early-out bound `MAX_SURFACE_M` MUST stay above the
+    /// true maximum surface height, or high terrain would be silently clipped to AIR. Sample
+    /// a wide, varied area (all biomes/regions) and assert every height stays under the bound.
+    #[test]
+    fn max_surface_bound_covers_real_terrain() {
+        let seed = 7u32;
+        let mut observed_max = 0.0f32;
+        for x in (0..200_000i64).step_by(263) {
+            let z = (x * 7) % 200_000;
+            observed_max = observed_max.max(surface_height_m(x, z, seed));
+        }
+        assert!(
+            observed_max < MAX_SURFACE_M,
+            "MAX_SURFACE_M ({MAX_SURFACE_M} m) must exceed real max surface ({observed_max:.1} m) \
+             — the air-chunk early-out would clip terrain otherwise"
+        );
+    }
+
+    /// A2 (2026-07-15): generating a chunk that lies ENTIRELY above the surface must be
+    /// near-free — it takes the O(1) whole-chunk AIR early-out (no height buffer, no per-column
+    /// classify loop) and returns a uniform-AIR chunk. The client streams many such air
+    /// chunks per column, so this must be an order of magnitude cheaper than a surface chunk.
+    #[test]
+    fn air_chunk_gen_is_cheap_and_empty() {
+        let seed = 7u32;
+        // World-Y ~2000 vox (250 m) is far above the ~60-140 m surface envelope → all AIR.
+        let high_cy = 60i64;
+        // Correctness: the high chunk must be empty (early-out must not change output).
+        let air = generate_chunk(ChunkCoord::new(3, high_cy, 5), seed);
+        assert!(
+            !chunk_has_any_solid(&air),
+            "chunk far above the surface must be all AIR"
+        );
+        // Speed: 5000 above-surface chunks must finish well under the budget a single
+        // surface chunk column would need without the early-out.
+        let t0 = Instant::now();
+        for i in 0..5000i64 {
+            let _ = generate_chunk(ChunkCoord::new(i % 400, high_cy, (i / 400) % 400), seed);
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            ms < 500.0,
+            "air-chunk gen too slow: {ms:.1} ms for 5000 chunks (early-out missing?)"
         );
     }
 

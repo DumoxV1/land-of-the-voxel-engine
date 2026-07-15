@@ -151,6 +151,28 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
         (fine-detail 0.5→0.0 m) — kwantiteit≠kwaliteit, oude hash beter voor variatie.
       - Shader-spike in renderer.rs: ONGEcommit (wacht op user A/B/C/D).
 
+27m. ✅ FASE A vervolg (2026-07-15, autonome CRON-herstart na stilgevallen hoofd-sessie):
+      chunk-loader hot-path A1+A2, strict TDD, 88/88 groen (was 83, +5 nieuw).
+      - **A1** `Chunk::is_empty()` (O(1) voor uniform) → `mesh_chunk_world_meters` slaat
+        `greedy_mesh` (~196k neighbour-probes + 6 allocs) over voor lege chunks.
+        Tests: uniform_air/solid + one-solid-voxel (voxel-core).
+      - **A2** `generate_chunk` early-out: (1) O(1) globale bound `MAX_SURFACE_M` (123 m) →
+        chunks boven het surface-plafond meteen leeg terug, zonder height-buffer/fBm;
+        (2) exacte per-kolom envelope-check voor onder-bedrock/boven-surface chunks.
+        Tests: max_surface_bound_covers_real_terrain (veiligheid: bound > echte max),
+        air_chunk_gen_is_cheap_and_empty (voxel-worldgen).
+      - **Meting (release, view-volume r48, cy 0..=14, 108.195 chunks, 91% air):**
+        baseline 933 chunks/s (1,07 ms/chunk) → **3862 chunks/s (0,26 ms/chunk) = 4,1×**,
+        IDENTIEKE output (3.693.532 tris in beide → geen visuele regressie).
+      - **Verificatie-tooling hersteld** (was stale sinds fBm-lift, mat lege scène):
+        `client_smoke` en `gpu_bench` streamden hardcoded cy=0 (onder de opgetilde surface
+        = AIR) → 0 frames. Nu berekenen ze de echte surface-cy + streamen Y-lagen via
+        `mesh_chunk_world_meters`. `client_smoke`: **120/120 frames** (spawn top=216 vox
+        ~27 m), geen panic, geen wit. `gpu_bench` 1 km² r48: **p50=9,33 ms / avg 93,8 FPS /
+        243k zichtbare tris/frame** (echte scène i.p.v. de oude lege-scène "3636 fps").
+      - renderer.rs (shader-spike) NIET aangeraakt/gecommit door deze sessie. Opmerking:
+        de spike blijkt inmiddels als commit 7b23b89 vastgelegd (buiten deze sessie om).
+
 ## Auditwaarschuwing
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
 
