@@ -1,0 +1,1 @@
+{"error": "Transcripts are disabled for this video."}
