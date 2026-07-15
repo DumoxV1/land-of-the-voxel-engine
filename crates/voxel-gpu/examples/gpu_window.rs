@@ -35,6 +35,7 @@ fn nearest_visible_chunk(
     ccx: i64,
     ccz: i64,
 ) -> Option<ChunkCoord> {
+    const MAX_Y: i64 = 12;
     let frustum = voxel_gpu::renderer::Frustum::from_view_proj(view_proj);
     let mut best: Option<(i64, ChunkCoord)> = None;
     for dx in -VIEW_RADIUS..=VIEW_RADIUS {
@@ -42,17 +43,19 @@ fn nearest_visible_chunk(
             let cx = ccx + dx;
             let cz = ccz + dz;
             // Negative chunk coords are valid (i64 + Euclidean div) — do not skip.
-            let center = [
-                (cx as f32 + 0.5) * CHUNK_M,
-                half_y,
-                (cz as f32 + 0.5) * CHUNK_M,
-            ];
-            if !frustum.intersects_aabb(center, half.max(half_y)) {
-                continue;
-            }
-            let dist = dx.abs() + dz.abs();
-            if best.map_or(true, |(bd, _)| dist < bd) {
-                best = Some((dist, ChunkCoord::new(cx, 0, cz)));
+            for cy in 0..=MAX_Y {
+                let center = [
+                    (cx as f32 + 0.5) * CHUNK_M,
+                    (cy as f32 * CHUNK_M) + half_y * 0.5,
+                    (cz as f32 + 0.5) * CHUNK_M,
+                ];
+                if !frustum.intersects_aabb(center, half.max(half_y)) {
+                    continue;
+                }
+                let dist = dx.abs() + dz.abs();
+                if best.map_or(true, |(bd, _)| dist < bd) {
+                    best = Some((dist, ChunkCoord::new(cx, cy, cz)));
+                }
             }
         }
     }
@@ -213,30 +216,22 @@ impl ApplicationHandler for App {
         self.scene = Some(scene);
 
         // First-person spawn: drop the camera onto the terrain at the spawn chunk.
+        // Use the canonical surface height (world-Y meters) so we spawn above real peaks.
         let spawn = ChunkCoord::new(1, 0, 1);
-        let chunk = self.world.get_or_generate(spawn);
-        let mut top = 0i64;
-        for lx in 0..CHUNK_SIZE as u8 {
-            for lz in 0..CHUNK_SIZE as u8 {
-                for ly in (0..CHUNK_SIZE as u8).rev() {
-                    if chunk.get(voxel_core::coords::LocalVoxel::new(lx, ly, lz)).0 != 0 {
-                        if (ly as i64) > top {
-                            top = ly as i64;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        // Eye ~3 voxels (37.5 cm) above the surface, at the chunk center.
+        let center_wx = (spawn.x * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
+        let center_wz = (spawn.z * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
+        let surface_m = voxel_worldgen::surface_height_m(center_wx, center_wz, self.seed);
+        let top_vox = (surface_m / 0.125) as i64;
+        // Eye ~120 voxels (15 m) above the surface so we look *over* the terrain,
+        // not into a cliff face (vertical-scale spike: peaks reach ~40 m now).
         let eye_x = 1.5 * chunk_m_size();
         let eye_z = 1.5 * chunk_m_size();
-        self.camera.eye = [eye_x, spawn_eye_y_m(top, 3), eye_z];
+        self.camera.eye = [eye_x, spawn_eye_y_m(top_vox, 120), eye_z];
         println!(
             "spawn: terrain top = {} voxels (~{:.2} m), eye_y = {:.2} m",
-            top,
-            top as f32 * 0.125,
-            spawn_eye_y_m(top, 3)
+            top_vox,
+            surface_m,
+            spawn_eye_y_m(top_vox, 120)
         );
 
         if let Some(w) = &self.window {
@@ -402,7 +397,8 @@ impl App {
         let ccx = (ex / CHUNK_M).floor() as i64;
         let ccz = (ez / CHUNK_M).floor() as i64;
         let half = CHUNK_M * 0.5; // 2 m half-extent (x/z)
-        let half_y = CHUNK_M * 1.5; // terrain is <= ~1 chunk tall, pad for height
+        let half_y = 24.0; // terrain peaks ~40 m; pad for height + camera clearance
+        const MAX_Y: i64 = 12; // stream chunks y=0..=12 (~48 m of vertical world)
         let frustum = voxel_gpu::renderer::Frustum::from_view_proj(&self.camera.view_proj());
         for dx in -VIEW_RADIUS..=VIEW_RADIUS {
             for dz in -VIEW_RADIUS..=VIEW_RADIUS {
@@ -411,22 +407,24 @@ impl App {
                 // NOTE: negative chunk coords are valid (ChunkCoord is i64 + Euclidean div).
                 // Do NOT skip them — skipping caused the "white screen when flying into
                 // negative space" bug.
-                // Frustum cull: skip chunks fully outside the camera view.
-                let center = [
-                    (cx as f32 + 0.5) * CHUNK_M,
-                    half_y,
-                    (cz as f32 + 0.5) * CHUNK_M,
-                ];
-                if !frustum.intersects_aabb(center, half.max(half_y)) {
-                    continue;
-                }
-                let coord = ChunkCoord::new(cx, 0, cz);
-                if let Some(m) = self.mesh_cache.get(&coord) {
-                    let slice = m.tris.clone();
-                    tris.extend_from_slice(&slice); // ready: draw (frustum-cull intact)
-                    // Mark recently visible (separate mutable borrow, after the immutable read).
-                    self.mesh_cache.touch(&coord, self.frame);
-                } else if !self.pending.contains(&coord) {
+                for cy in 0..=MAX_Y {
+                    // Frustum cull: skip chunks fully outside the camera view. Center Y = middle
+                    // of this vertical chunk slab.
+                    let center = [
+                        (cx as f32 + 0.5) * CHUNK_M,
+                        (cy as f32 * CHUNK_M) + half_y * 0.5,
+                        (cz as f32 + 0.5) * CHUNK_M,
+                    ];
+                    if !frustum.intersects_aabb(center, half.max(half_y)) {
+                        continue;
+                    }
+                    let coord = ChunkCoord::new(cx, cy, cz);
+                    if let Some(m) = self.mesh_cache.get(&coord) {
+                        let slice = m.tris.clone();
+                        tris.extend_from_slice(&slice); // ready: draw (frustum-cull intact)
+                        // Mark recently visible (separate mutable borrow, after the immutable read).
+                        self.mesh_cache.touch(&coord, self.frame);
+                    } else if !self.pending.contains(&coord) {
                     // Not ready and not yet requested: spawn off-thread generate+mesh.
                     let g = self.requested_gen.entry(coord).or_insert(0);
                     *g += 1;
@@ -442,8 +440,9 @@ impl App {
                     });
                 }
                 // else: pending, not ready yet -> skipped this frame, pops in later.
-            }
-        }
+                } // cy
+            } // dz
+        } // dx
 
         // Frame-1 fallback only: seed one visible chunk while async jobs are still pending.
         if tris.is_empty() {

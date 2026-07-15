@@ -25,8 +25,8 @@ fn material_at_reads_without_clone_and_matches_chunk() {
     let mut w = flat_world();
     // Solid where we placed stone.
     assert!(w.material_at(WorldVoxel::new(0, 0, 0)) == MaterialId::from(3));
-    // Air well above any generated terrain (heightmap tops out far below y=40).
-    assert!(w.material_at(WorldVoxel::new(0, 40, 0)) == MaterialId::from(0));
+    // Air well above any generated terrain (heightmap now reaches ~40 m / y=320).
+    assert!(w.material_at(WorldVoxel::new(0, 400, 0)) == MaterialId::from(0));
     // Generated (non-edited) chunk returns a deterministic material, not an error/panic.
     let m = w.material_at(WorldVoxel::new(100, 0, 100));
     // Geen clone nodig: de API levert een value direct. We eisen enkel dat het

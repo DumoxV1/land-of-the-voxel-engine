@@ -24,11 +24,12 @@ fn empty_region(w: &mut World, x0: i64, x1: i64, y0: i64, y1: i64, z0: i64, z1: 
 #[test]
 fn high_fall_lands_on_thin_floor() {
     let mut world = World::new(0);
-    // Clear a tall shaft and put a single-thick floor at y = 10.
-    empty_region(&mut world, 6, 12, 0, 32, 6, 12);
+    // Clear a tall shaft and put a single-thick floor at y = 400 (above the
+    // worldgen terrain cap so the manual floor isn't overwritten by generated hills).
+    empty_region(&mut world, 6, 12, 0, 410, 6, 12);
     for x in 6..12 {
         for z in 6..12 {
-            world.set_voxel(WorldVoxel::new(x, 10, z), MaterialId::from(3));
+            world.set_voxel(WorldVoxel::new(x, 400, z), MaterialId::from(3));
         }
     }
     let mut player = Player::new([8.5, 500.0, 8.5]);
@@ -44,8 +45,8 @@ fn high_fall_lands_on_thin_floor() {
     );
     let feet = player.pos[1] - 0.9; // HALF[1]
     assert!(
-        (feet - 11.0).abs() < 0.1,
-        "feet must rest on top of the y=10 floor (y=11), got feet={feet} pos={:?}",
+        (feet - 401.0).abs() < 0.1,
+        "feet must rest on top of the y=400 floor (y=401), got feet={feet} pos={:?}",
         player.pos
     );
 }
@@ -56,31 +57,31 @@ fn high_fall_lands_on_thin_floor() {
 #[test]
 fn floor_resolve_covers_full_footprint() {
     let mut world = World::new(0);
-    empty_region(&mut world, 6, 14, 0, 32, 6, 14);
-    // Low floor everywhere at y=4; a higher step at x=10..12 at y=6.
+    empty_region(&mut world, 6, 14, 0, 410, 6, 14);
+    // Low floor everywhere at y=400; a higher step at x=10..12 at y=402.
     for x in 6..14 {
         for z in 6..14 {
-            world.set_voxel(WorldVoxel::new(x, 4, z), MaterialId::from(3));
+            world.set_voxel(WorldVoxel::new(x, 400, z), MaterialId::from(3));
         }
     }
     for x in 10..12 {
         for z in 6..14 {
-            world.set_voxel(WorldVoxel::new(x, 6, z), MaterialId::from(3));
+            world.set_voxel(WorldVoxel::new(x, 402, z), MaterialId::from(3));
         }
     }
     // Player center in column x=9 but hitbox (half-width 0.3) overlapping x=10 (the step).
-    let mut player = Player::new([9.9, 12.0, 8.5]);
+    let mut player = Player::new([9.9, 412.0, 8.5]);
     let mut ctrl = PlayerController::new();
     for _ in 0..100 {
         ctrl.step(&mut world, &mut player, Input::none(), 0.1);
     }
     assert!(player.on_ground, "must land, pos = {:?}", player.pos);
     let feet = player.pos[1] - 0.9;
-    // The hitbox overlaps the y=6 step, so feet must rest on its top (y=7) —
-    // resting at y=5 means the resolver ignored the overlapped column (audit bug).
+    // The hitbox overlaps the y=402 step, so feet must rest on its top (y=403) —
+    // resting at y=401 means the resolver ignored the overlapped column (audit bug).
     assert!(
-        (feet - 7.0).abs() < 0.1,
-        "feet must rest on the step top y=7 (footprint overlaps it), got feet={feet} pos={:?}",
+        (feet - 403.0).abs() < 0.1,
+        "feet must rest on the step top y=403 (footprint overlaps it), got feet={feet} pos={:?}",
         player.pos
     );
 }

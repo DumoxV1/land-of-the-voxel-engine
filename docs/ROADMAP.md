@@ -144,6 +144,10 @@ Bevy/wgpu (ADR-0004, status Proposed).
 - [ ] voxel-gpu unit-tests voor CPU-kant (`view_proj`, `material_tint`, vertex-layout).
 
 ### Fase 3 — Werelddichtheid & content (opschalen)
+- [x] **Vertical-scale spike (2026-07-15):** terrain nu ~40m (fBm amplitude 40m,
+      multi-chunk-Y, 12 Y-lagen gestreamd). Mens van 1,75m oogt klein. Echte
+      150-200m filmische schaal = Fase 5 (LOD/clipmap), niet eerder (blaaast VBO
+      zonder LOD).
 - [ ] Worldgen-verdieping (advies #6): gelaagde noise-velden (continentalness/erosie/moisture)
       + spline-mapping + biome-lookup-tabel; rivieren via globale pre-simulatie (Veloren-model).
 - [ ] Belichting (advies #4): vertex voxel-AO (0fps-methode, let op quad-flip pitfall) +

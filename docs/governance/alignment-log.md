@@ -2,6 +2,28 @@
 
 Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastgelegd.
 
+## 2026-07-15 — Vertical-scale spike: ~40 m terrain (mens oogt klein)
+
+- User-klacht: "blokjes erg groot, mens van 1,60-2,30m spawn = giga groot". Root
+  cause (uit code): `height()` clampte op `[0, SIZE-1]` = **0..3,875m** (1 chunk),
+  en `gpu_window` streamde alleen `ChunkCoord::new(cx, 0, cz)` (y=0). Terrain
+  was een 4 m vlak tafelkleedje → mens-oegen reusachtig. Blokjes waren WEL 12,5cm
+  (correct); de *wereldhoogte* was te plat.
+- Fix (TDD, Rood→Groen): nieuw `surface_height_m(x,z,seed)` (fBm, amplitude 40 m,
+  octaves 2048/512/128/32/4 voxels = 256m→0,5m detail). `generate_chunk` itereert nu
+  over WORLD-Y (`coord.y*SIZE + ly`), `classify` krijgt world-Y + slope via `surface_height_m`.
+  `gpu_window` streamt Y-chunks 0..=12 (~48m) met frustum-cull per slab; spawn-eye ~15m
+  boven surface (niet 0,375m) → je kijkt *over* het landschap, niet in een rotswand.
+- Tests (Rood→Groen): `terrain_exceeds_human_scale` (>=16m, zag 3,4m),
+  `chunks_span_multiple_y_layers` (>=2 Y-chunks, zag 1), `terrain_has_fractal_relief`
+  (meters-schaal, fijne octaaf toegevoegd). 3 bestaande tests gecascade (player/server/world)
+  die lage floors boven terrain-hoogte zetten (nu 40m i.p.v. 4m).
+- Geverifieerd: spawn "terrain top = 210 voxels (~26,35 m)" (was 31/3,875m); live capture
+  UNIQUE_COLORS 863→3379 (4× variatie, groen valei + grijze rotsen op afstand),
+  NEAR_WHITE=0,27%, CLEAR=0%. 36/36 groen.
+- NOTITIE: echte filmische 150-200m-schaal = 50 Y-lagen → blaast VBO (256MB) op
+  zonder LOD. Die schaal = Fase 5 (LOD/clipmap), niet nu. Huidige ~40m is veilig.
+
 ## 2026-07-15 — Fase 2: LRU mesh-cache + view-distance GPU-residency policy
 
 - Geïmplementeerd onder strikte TDD (vóór code stond `mesh_cache: HashMap` = onbegrensde cache

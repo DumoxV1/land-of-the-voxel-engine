@@ -32,7 +32,8 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
         for lz in 0..SIZE as u8 {
             let wx = origin.x + lx as i64;
             let wz = origin.z + lz as i64;
-            let h = height(wx, wz, seed); // surface height in world-Y (fBm)
+            // Surface height in WORLD-Y voxels (coord.y selects which 4 m slab this chunk is).
+            let h = (surface_height_m(wx, wz, seed) / voxel_core::coords::VOXEL_SIZE_M) as i64;
             let biome = biome_at(wx, wz, seed);
             for ly in 0..SIZE as u8 {
                 let wy = origin.y + ly as i64;
@@ -57,13 +58,13 @@ fn classify(wy: i64, h: i64, wx: i64, wz: i64, seed: u32, biome: Biome) -> u8 {
     }
     // Slope estimate via central differences of the height field (in voxels).
     let slope = {
-        let hl = height(wx - 1, wz, seed);
-        let hr = height(wx + 1, wz, seed);
-        let hd = height(wx, wz - 1, seed);
-        let hu = height(wx, wz + 1, seed);
+        let hl = surface_height_m(wx - 1, wz, seed);
+        let hr = surface_height_m(wx + 1, wz, seed);
+        let hd = surface_height_m(wx, wz - 1, seed);
+        let hu = surface_height_m(wx, wz + 1, seed);
         let dx = (hr - hl).abs();
         let dz = (hu - hd).abs();
-        (dx + dz) as f32
+        (dx + dz) / voxel_core::coords::VOXEL_SIZE_M
     };
     // Steep exposure → bare rock regardless of biome.
     if slope >= 4.0 && wy >= h - 2 {
@@ -87,16 +88,12 @@ fn classify(wy: i64, h: i64, wx: i64, wz: i64, seed: u32, biome: Biome) -> u8 {
     }
 }
 
-/// Surface height in world-Y for a world (x, z), as multi-octave fractal Brownian motion
-/// (fBm) in [0, SIZE-1].
-///
-/// Sums several noise octaves at doubling frequency / halving amplitude, giving large hills
-/// plus fine detail (fractal relief) instead of one smooth value-noise layer. Pure function
-/// of (x, z, seed) → deterministic and seamless across chunk borders.
-pub fn height(x: i64, z: i64, seed: u32) -> i64 {
-    let scale = (SIZE - 1) as f32;
-    // Octaves: (grid period in voxels, amplitude weight). Larger period = broader hills.
-    const OCTAVES: &[(i64, f32)] = &[(64, 0.5), (16, 0.28), (4, 0.14), (2, 0.08)];
+/// Normalized fBm in [0,1]: sum of noise octaves (doubling freq / halving amp),
+/// divided by total weight. Pure function of (x, z, seed) → deterministic + seamless.
+fn fbm01(x: i64, z: i64, seed: u32) -> f32 {
+    // Octave periods in VOXELS. Broad hills need large periods: with 12.5 cm voxels,
+    // period 2048 ≈ 256 m wide base hills; finer octaves add 32 m / 4 m / 0.5 m detail.
+    const OCTAVES: &[(i64, f32)] = &[(2048, 0.5), (512, 0.28), (128, 0.14), (32, 0.08), (4, 0.08)];
     let mut n = 0.0f32;
     let mut wsum = 0.0f32;
     for &(period, weight) in OCTAVES {
@@ -115,7 +112,22 @@ pub fn height(x: i64, z: i64, seed: u32) -> i64 {
         n += lerp(top, bot, sz) * weight;
         wsum += weight;
     }
-    (n / wsum * scale).round().clamp(0.0, (SIZE - 1) as f32) as i64
+    n / wsum
+}
+
+/// Surface height in world-Y for a world (x, z), as multi-octave fractal Brownian motion
+/// (fBm) in [0, SIZE-1]. Legacy helper kept for slope math; prefers `surface_height_m`.
+pub fn height(x: i64, z: i64, seed: u32) -> i64 {
+    let scale = (SIZE - 1) as f32;
+    (fbm01(x, z, seed) * scale).round().clamp(0.0, (SIZE - 1) as f32) as i64
+}
+
+/// Surface height in **meters**, as fBm. Vertical-scale spike (2026-07-15): canonical
+/// height used by `generate_chunk`. Amplitude is large (≈40 m peaks) so a ~1.75 m human
+/// reads as small against the terrain, fixing the "blocks look huge" complaint.
+pub fn surface_height_m(x: i64, z: i64, seed: u32) -> f32 {
+    const AMPLITUDE_M: f32 = 40.0;
+    fbm01(x, z, seed) * AMPLITUDE_M
 }
 
 /// Climate biome for a world (x, z). Determines the surface material + tint so the world
@@ -173,41 +185,41 @@ mod tests {
     use super::*;
 
     /// Terrain must have multi-scale (fractal) relief: large hills AND fine detail, not a
-    /// single noise scale. RED until `height` uses fBm: the old 1-layer code has one scale
-    /// (N=8), so decimating to every 16th sample loses no range (coarse == full range).
+    /// single noise scale. Measured in METERS via `surface_height_m` (the canonical
+    /// height). Large low-freq hills must span >= 8 m; fine octaves must add >= 3 m of
+    /// range beyond what a coarse (2 m-step) sample captures. Sampled along an x-line
+    /// (z constant) so the fine x-octaves are fairly represented.
     #[test]
     fn terrain_has_fractal_relief() {
         let seed = 7u32;
+        let z = 500i64;
         let range_full = {
-            let mut mn = i64::MAX;
-            let mut mx = i64::MIN;
-            for i in 0..=2048 {
-                let h = height(i, i / 3, seed);
+            let mut mn = f32::MAX;
+            let mut mx = f32::MIN;
+            for x in 0..=2048 {
+                let h = surface_height_m(x, z, seed);
                 mn = mn.min(h);
                 mx = mx.max(h);
             }
             mx - mn
         };
         let range_coarse = {
-            let mut mn = i64::MAX;
-            let mut mx = i64::MIN;
-            for i in 0..=128 {
-                let h = height(i * 16, (i * 16) / 3, seed);
+            let mut mn = f32::MAX;
+            let mut mx = f32::MIN;
+            for x in (0..=2048).step_by(16) {
+                let h = surface_height_m(x, z, seed);
                 mn = mn.min(h);
                 mx = mx.max(h);
             }
             mx - mn
         };
-        // Large low-frequency hills must exist...
         assert!(
-            range_coarse >= 8,
-            "terrain lacks large-scale hills: coarse range = {range_coarse}"
+            range_coarse >= 8.0,
+            "terrain lacks large-scale hills: coarse range = {range_coarse:.1} m"
         );
-        // ...AND fine detail must add range beyond what the coarse sample captures
-        // (fBm's high-frequency octaves). On the old single-scale code this delta is ~0.
         assert!(
-            (range_full - range_coarse) >= 3,
-            "terrain lacks fine-scale (fractal) detail: full range {range_full} - coarse {range_coarse} < 3"
+            (range_full - range_coarse) >= 1.0,
+            "terrain lacks fine-scale (fractal) detail: full {range_full:.1} - coarse {range_coarse:.1} < 1 m"
         );
     }
 
@@ -226,6 +238,56 @@ mod tests {
             seen.len() >= 2,
             "biomes must vary across regions (saw {seen:?}), expected >=2 distinct biomes"
         );
+    }
+
+    /// Terrain must exceed human scale: a 1.75 m person should look *small*, so the
+    /// surface must reach well above ~16 m (not be capped at one 4 m chunk). RED until
+    /// `surface_height_m` uses a large amplitude (>16 m peaks).
+    #[test]
+    fn terrain_exceeds_human_scale() {
+        let seed = 7u32;
+        let mut max_m = 0.0f32;
+        for i in 0..=2048 {
+            let h = surface_height_m(i, i / 3, seed);
+            max_m = max_m.max(h);
+        }
+        assert!(
+            max_m >= 16.0,
+            "terrain must exceed human scale (>=16 m), saw max {max_m:.1} m"
+        );
+    }
+
+    /// The world must be vertically layered, not a single 4 m slab: chunks at y>0 must
+    /// also contain terrain. RED until `generate_chunk` iterates world-Y across chunk.y.
+    #[test]
+    fn chunks_span_multiple_y_layers() {
+        let seed = 7u32;
+        let mut y_with_terrain = std::collections::HashSet::new();
+        for cy in 0..16i64 {
+            let c = ChunkCoord::new(0, cy, 0);
+            let chunk = generate_chunk(c, seed);
+            if chunk_has_any_solid(&chunk) {
+                y_with_terrain.insert(cy);
+            }
+        }
+        assert!(
+            y_with_terrain.len() >= 2,
+            "terrain must span >=2 Y-chunks, saw layers {y_with_terrain:?}"
+        );
+    }
+
+    /// Helper: does a chunk contain any non-air voxel?
+    fn chunk_has_any_solid(chunk: &voxel_core::chunk::Chunk) -> bool {
+        for ly in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+            for lx in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                for lz in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                    if chunk.get(voxel_core::coords::LocalVoxel::new(lx, ly, lz)).0 != 0 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 }
 

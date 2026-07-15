@@ -102,6 +102,15 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       M4 P1 (BCn+mipmaps) of Fase-3 vertex-AO + schaduw + smooth voxels. Raytracing genoteerd
       als latere fase (zie roadmap — vereist andere pipeline dan huidige mesh-renderer).
 
+27f. ✅ Vertical-scale spike (2026-07-15): terrain was gekapt op 4m (1 chunk-Y)
+      → mens oogde reusachtig. Nieuw `surface_height_m` (fBm, ampl 40m, octaves
+      2048..4 voxels). `generate_chunk` itereert nu WORLD-Y (multi-chunk-Y), `gpu_window`
+      streamt Y-lagen 0..=12 + spawn-eye ~15m boven surface. TDD: 3 nieuwe tests
+      (Rood→Groen) + 3 gecascade tests gefixt (player/server/world). Geverifieerd: spawn
+      "terrain top=210 vox (~26m)" (was 3,875m); live capture UNIQUE 863→3379 (4× variatie),
+      NEAR_WHITE=0.27%, CLEAR=0% (geen wit). 36/36 groen. Echte 150-200m filmische
+      schaal = Fase 5 (LOD/clipmap), niet nu (blaaast VBO zonder LOD).
+
 ## Auditwaarschuwing
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
 
