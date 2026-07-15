@@ -662,6 +662,15 @@ impl App {
                     self.scheduler.forget(&job.coord);
                     continue;
                 }
+                // Stap 2 (inter-chunk occlusie, LxVL): skip chunks hidden behind taller
+                // terrain along the view yaw. Pure height-wall check; drops work the player
+                // literally cannot see (e.g. the far side of a hill). Re-planned next frame.
+                if voxel_gpu::chunk_stream::is_occluded_by_terrain(
+                    ccx, ccz, self.yaw, job.coord, _ey, &mut self.heights, self.seed,
+                ) {
+                    self.scheduler.forget(&job.coord);
+                    continue;
+                }
                 // Bounded channel: if the workers are saturated, drop the job (re-issued next
                 // frame). This is the real back-pressure that keeps the CPU responsive.
                 let _ = tx.try_send(job);

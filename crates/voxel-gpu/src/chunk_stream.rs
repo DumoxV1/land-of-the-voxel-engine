@@ -328,6 +328,54 @@ impl ChunkScheduler {
     }
 }
 
+/// Stap 2 (inter-chunk occlusie, LxVL): returns true if `target` column is hidden behind
+/// taller terrain along the camera's forward yaw. We walk a ray of chunk-columns from the
+/// camera column toward `target`; if any *closer* column has a surface height that exceeds
+/// `target`'s surface + `cam_y` (camera eye height), the target is tucked behind the
+/// "height wall" and need not be generated/meshed this frame.
+///
+/// Pure + cheap (one ray of length ≤ view radius). The client calls this in Pass A, after
+/// frustum culling, to drop chunks the player literally cannot see because a hill/peak
+/// blocks the line of sight.
+pub fn is_occluded_by_terrain(
+    ccx: i64,
+    ccz: i64,
+    yaw: f32,
+    target: ChunkCoord,
+    cam_y: f32,
+    heights: &mut HeightCache,
+    seed: u32,
+) -> bool {
+    let (sy, cy) = yaw.sin_cos(); // forward = (cy, sy) on the XZ plane
+    let (dx, dz) = (cy, sy);
+    // Step from the camera column outward; stop before reaching the target itself.
+    let mut step = 1i64;
+    loop {
+        let ix = ccx + (dx * step as f32).round() as i64;
+        let iz = ccz + (dz * step as f32).round() as i64;
+        if ix == target.x && iz == target.z {
+            break; // reached the target's own column; no occluder between
+        }
+        // Manhattan/chebyshev distance from camera to this sample column.
+        let dist = ((ix - ccx).unsigned_abs().max((iz - ccz).unsigned_abs())) as i64;
+        let target_dist =
+            ((target.x - ccx).unsigned_abs().max((target.z - ccz).unsigned_abs())) as i64;
+        if dist >= target_dist {
+            break; // overshot past the target's ring; nothing between
+        }
+        let occ_h = heights.surface_vox(ix, iz, seed) as f32 * VOXEL_SIZE;
+        let tgt_h = heights.surface_vox(target.x, target.z, seed) as f32 * VOXEL_SIZE;
+        if occ_h > tgt_h + cam_y {
+            return true; // a closer, taller column blocks the line of sight
+        }
+        step += 1;
+        if step > 64 {
+            break; // safety bound
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +475,43 @@ mod tests {
         }
         // And at least some jobs were produced (surface exists within max_y).
         assert!(!jobs.is_empty(), "scheduler must produce jobs for a surface within max_y");
+    }
+
+    #[test]
+    fn occlusion_cull_skips_chunks_behind_tall_terrain() {
+        // Camera at (0,0) looking +X (yaw = 0 -> forward = (1,0)). A tall peak at column x=2
+        // (surface 30 m) must occlude a short column at x=5 (surface 2 m) behind it.
+        let mut hc = HeightCache::new(1024);
+        let seed = 7u32;
+        // Force specific heights via the cache (surface_vox memoizes; seed must match usage).
+        hc.surface_vox(0, 0, seed); // camera column (whatever height)
+        hc.surface_vox(2, 0, seed);
+        hc.surface_vox(5, 0, seed);
+        // Override the memoized heights directly to simulate a peak + valley.
+        hc.map.insert((2, 0), (30.0 / VOXEL_SIZE) as i64); // 30 m peak
+        hc.map.insert((5, 0), (2.0 / VOXEL_SIZE) as i64); // 2 m valley behind it
+        hc.map.insert((0, 0), (2.0 / VOXEL_SIZE) as i64); // camera on low ground
+
+        let target = ChunkCoord::new(5, 0, 0);
+        let occluded = is_occluded_by_terrain(0, 0, 0.0, target, 1.5, &mut hc, seed);
+        assert!(
+            occluded,
+            "chunk behind a 30 m peak (cam at 1.5 m) must be occluded"
+        );
+
+        // Control: a chunk at x=5 with NO tall column between camera and it is NOT occluded.
+        let mut hc2 = HeightCache::new(1024);
+        hc2.surface_vox(0, 0, seed);
+        hc2.surface_vox(5, 0, seed);
+        // Flatten the whole line of sight (x=0..5) to 2 m so nothing occludes.
+        for x in 0..=5 {
+            hc2.map.insert((x, 0), (2.0 / VOXEL_SIZE) as i64);
+        }
+        let target2 = ChunkCoord::new(5, 0, 0);
+        let not_occluded = is_occluded_by_terrain(0, 0, 0.0, target2, 1.5, &mut hc2, seed);
+        assert!(
+            !not_occluded,
+            "flat terrain with no occluder must not be culled"
+        );
     }
 }

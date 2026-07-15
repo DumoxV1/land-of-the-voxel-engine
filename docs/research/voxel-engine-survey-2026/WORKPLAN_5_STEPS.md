@@ -10,14 +10,16 @@
 ## Stap 1 — Crack-free skirts (LOD-bug fix)  [HOOGSTE ROI]
 **Probleem:** 3-tier LOD (Full/Half/Imposter) heeft geen stitching → kieren op ring-grenzen.
 **Oplossing:** hangende rand (skirt) rond elke LOD-chunk in `mesh_chunk_world_meters`.
-**Acceptatie:** unit-test `adjacent_full_and_half_chunks_have_no_visible_gap` (Rood→Groen) + visuele capture bij ring-overgang.
-**Status:** ← NU UITGEVOERD
+**Acceptatie:** unit-test `skirt_adds_hanging_band_below_surface` (Rood→Groen) + visuele capture bij ring-overgang.
+**Status:** ✅ VOLTOOID + gepusht (`7a0c12b`), 22/22 lib tests, smoke 120/120.
 
 ## Stap 2 — Inter-chunk occlusie (LxVL)
 **Probleem:** alleen frustum-culling; geen chunk-chunk occlusie.
-**Oplossing:** 6×6 chunk-face visibiliteitsgraph + walk van camera-column in kijkrichting.
-**Acceptatie:** tracer `occlusion_cull_reduces_visible_chunks_by_X_pct` bij view-radius 48.
-**Status:** ← ONDERZOEK NA STAP 1
+**Oplossing (uit set-a):** height-wall occlusie in client Pass A. Voor elke chunk-kolom in de
+kijkrichting (yaw), als een dichtbijere kolom een surface heeft die hoger is dan de huidige
+kolom + cam-hoogte, is de huidige kolom (en alles erachter op die lijn) occluded → skip.
+**Acceptatie:** tracer `occlusion_cull_skips_chunks_behind_tall_terrain` (Rood→Groen) bij view-radius 12.
+**Status:** ← NU UITGEVOERD (onderzoek reeds in set-a.md)
 
 ## Stap 3 — BFS zonglift-lighting (fS3V)
 **Probleem:** geen cave/overhang-schaduw; alleen vertex-AO.
