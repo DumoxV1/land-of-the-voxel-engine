@@ -2,7 +2,25 @@
 
 Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastgelegd.
 
-## 2026-07-15 — Vertical-scale spike: ~40 m terrain (mens oogt klein)
+## 2026-07-15 — Load-time + VBO-overflow fix (vertical-scale spike fallout)
+
+- Fallout van de vertical-scale spike: streamen van Y-lagen 0..=12 vermenigvuldigde de
+  chunk-set 13x (576 -> ~6900). Symptomen: (1) **10 min eerste laadtijd** (UPLOAD_BUDGET=4
+  + worker-flood op lege luchtslabs), (2) **VBO-panic** bij spawn (`write_buffer` 271MB
+  overschreed 256MB staging-cap -> app crashte).
+- Fixes (TDD-groen blijft 36/36):
+  - Y-streaming nu per-kolom gebound op `max_cy = (surface_height_m/0.125 + 32)/32`
+    (slaat de ~11 lege slaben boven de ~26m pieken over). ~halveert de chunk-set.
+  - `UPLOAD_BUDGET` 4 -> 64 (flood drained in ~50 frames i.p.v. 1728).
+  - `VBO_BYTES_CAP=256MB` gate in streaming-loop: stop met chunks aanvragen boven de cap;
+    verre chunks poppen later in als de camera beweegt / evict.
+  - Renderer: `verts` hard getruncated op `vbo_capacity` vóór write_buffer + draw (crash-proof;
+    was een "truncate" claim maar deed het niet). Logt `VBO budget exceeded` warn.
+- Geverifieerd: spawn op eye_y=41.25m, **geen panic**, live capture UNIQUE_COLORS=3316,
+  NEAR_WHITE=0.002%, CLEAR=0%. 36/36 groen.
+- NOTITIE: 256MB VBO is nu de harde plafond voor zichtbare terrain. Echte 150-200m
+  filmische schaal + volledige view-distance vereist VBO-vergroting OF LOD/clipmap (Fase 5).
+  Dit is de #1 optimalisatie-target voor de volgende sessie.
 
 - User-klacht: "blokjes erg groot, mens van 1,60-2,30m spawn = giga groot". Root
   cause (uit code): `height()` clampte op `[0, SIZE-1]` = **0..3,875m** (1 chunk),

@@ -22,8 +22,14 @@ use voxel_world::World;
 /// View distance in chunks. On the 12.5 cm scale a 4 m chunk -> 32 chunks ~= 128 m view.
 const CHUNK_M: f32 = CHUNK_SIZE as f32 * VOXEL_SIZE_M; // 4 m (ADR-0005)
 const VIEW_RADIUS: i64 = 24; // ~96 m view radius
+/// Max VBO bytes we will fill. Matches the renderer's 256 MB staging cap. Once the
+/// streamed mesh set reaches this, we stop requesting new chunks for this frame — the
+/// rest pop in later as the camera moves / far chunks evict. Prevents the vertical-scale
+/// spike from building 1.5 GB of meshes that can never be drawn (and keeps first load fast).
+const VBO_BYTES_CAP: usize = 256 * 1024 * 1024;
 /// Max chunks whose meshes we ingest from the worker channel per frame (P3 upload budget).
-const UPLOAD_BUDGET: usize = 4;
+const UPLOAD_BUDGET: usize = 64; // chunks uploaded/frame; raised from 4 after the
+                                 // vertical-scale spike multiplied the streamed set
 
 /// Find the chunk nearest the camera (Manhattan distance in chunk space) that passes the
 /// frustum test — used by the "never go white" guard to seed at least one mesh on frame 1.
@@ -393,21 +399,30 @@ impl App {
 
         // --- Chunk-streaming: draw visible chunks; request missing ones off-thread. ---
         let mut tris: Vec<Triangle> = Vec::new();
+        let mut vbo_bytes: usize = 0; // running estimate of streamed mesh bytes (VBO cap gate)
         let [ex, _ey, ez] = self.camera.eye;
         let ccx = (ex / CHUNK_M).floor() as i64;
         let ccz = (ez / CHUNK_M).floor() as i64;
         let half = CHUNK_M * 0.5; // 2 m half-extent (x/z)
         let half_y = 24.0; // terrain peaks ~40 m; pad for height + camera clearance
-        const MAX_Y: i64 = 12; // stream chunks y=0..=12 (~48 m of vertical world)
+        const MAX_Y: i64 = 12; // hard cap on streamed vertical chunks (~48 m)
         let frustum = voxel_gpu::renderer::Frustum::from_view_proj(&self.camera.view_proj());
         for dx in -VIEW_RADIUS..=VIEW_RADIUS {
             for dz in -VIEW_RADIUS..=VIEW_RADIUS {
                 let cx = ccx + dx;
                 let cz = ccz + dz;
+                // Only stream Y-slabs that can contain terrain: a column's surface height
+                // bounds how high a solid voxel can appear. This avoids generating/meshing
+                // the ~11 empty slabs above the ~26 m peaks (vertical-scale spike made the
+                // raw 0..=MAX_Y sweep 13x the old chunk count -> multi-minute first load).
+                let col_wx = (cx * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
+                let col_wz = (cz * voxel_core::coords::CHUNK_SIZE + voxel_core::coords::CHUNK_SIZE / 2) as i64;
+                let col_top_vox = (voxel_worldgen::surface_height_m(col_wx, col_wz, self.seed) / 0.125) as i64;
+                let max_cy = ((col_top_vox + voxel_core::coords::CHUNK_SIZE as i64) / voxel_core::coords::CHUNK_SIZE as i64).min(MAX_Y);
                 // NOTE: negative chunk coords are valid (ChunkCoord is i64 + Euclidean div).
                 // Do NOT skip them — skipping caused the "white screen when flying into
                 // negative space" bug.
-                for cy in 0..=MAX_Y {
+                for cy in 0..=max_cy {
                     // Frustum cull: skip chunks fully outside the camera view. Center Y = middle
                     // of this vertical chunk slab.
                     let center = [
@@ -422,9 +437,17 @@ impl App {
                     if let Some(m) = self.mesh_cache.get(&coord) {
                         let slice = m.tris.clone();
                         tris.extend_from_slice(&slice); // ready: draw (frustum-cull intact)
+                        vbo_bytes += slice.len() * std::mem::size_of::<voxel_mesher::Triangle>();
                         // Mark recently visible (separate mutable borrow, after the immutable read).
                         self.mesh_cache.touch(&coord, self.frame);
                     } else if !self.pending.contains(&coord) {
+                        // VBO budget gate: don't request more chunks once we've filled the
+                        // 256 MB cap — the rest pop in later as the camera moves / far
+                        // chunks evict. Keeps first load fast post vertical-scale spike.
+                        if vbo_bytes >= VBO_BYTES_CAP {
+                            continue;
+                        }
+                        vbo_bytes += 32 * 32 * 32 / 2 * std::mem::size_of::<voxel_mesher::Triangle>();
                     // Not ready and not yet requested: spawn off-thread generate+mesh.
                     let g = self.requested_gen.entry(coord).or_insert(0);
                     *g += 1;

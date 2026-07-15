@@ -560,6 +560,18 @@ impl GpuScene {
                 b
             }
         };
+        // Hard cap the uploaded/drawn vertices to the buffer capacity so an oversized
+        // terrain frame can never overrun write_buffer (was a launch panic once the
+        // vertical-scale spike pushed the streamed mesh set past 256 MB).
+        let cap_verts = self.vbo_capacity / std::mem::size_of::<GpuVertex>();
+        if verts.len() > cap_verts {
+            log::warn!(
+                "VBO budget exceeded: {} verts > {} cap, truncating draw (raise VBO cap or add LOD)",
+                verts.len(),
+                cap_verts
+            );
+            verts.truncate(cap_verts);
+        }
         self.queue
             .write_buffer(&vbuf, 0, bytemuck::cast_slice(&verts));
 

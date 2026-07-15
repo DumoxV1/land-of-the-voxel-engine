@@ -102,7 +102,12 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       M4 P1 (BCn+mipmaps) of Fase-3 vertex-AO + schaduw + smooth voxels. Raytracing genoteerd
       als latere fase (zie roadmap — vereist andere pipeline dan huidige mesh-renderer).
 
-27f. ✅ Vertical-scale spike (2026-07-15): terrain was gekapt op 4m (1 chunk-Y)
+27g. ✅ Vertical-scale spike (2026-07-15): zie 27f. Fallout gefixed: 10-min laadtijd +
+      VBO-panic. Y-streaming per-kolom gebound (max_cy), UPLOAD_BUDGET 4->64, VBO_BYTES_CAP
+      256MB gate in streaming-loop, renderer hard-truncate verts op vbo_capacity (crash-proof).
+      Geverifieerd: geen panic, UNIQUE_COLORS=3316, NEAR_WHITE=0.002%, CLEAR=0%, 36/36 groen.
+      #1 optimalisatie-target volgende sessie: VBO-vergroting OF LOD/clipmap voor volledige
+      view-distance + 150-200m filmische schaal.
       → mens oogde reusachtig. Nieuw `surface_height_m` (fBm, ampl 40m, octaves
       2048..4 voxels). `generate_chunk` itereert nu WORLD-Y (multi-chunk-Y), `gpu_window`
       streamt Y-lagen 0..=12 + spawn-eye ~15m boven surface. TDD: 3 nieuwe tests
