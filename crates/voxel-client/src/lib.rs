@@ -15,6 +15,8 @@
 //! - Worker messages are two-phase (`voxel_gpu::WorkerMsg`): `Gen` (raw chunk for collision,
 //!   shipped first) then `Mesh` (triangles for drawing) — collision-first (A3).
 
+mod hud; // debug HUD: bitmap-font FPS/stats overlay, drawn after the voxel pass.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -179,6 +181,8 @@ pub struct App {
     last_frame: std::time::Instant,
     // Day/night phase (0..1, F2) — advances slowly each frame.
     time_of_day: f32,
+    // Debug HUD (top-right): FPS + live stats, drawn after the voxel pass.
+    hud: Option<hud::Hud>,
 }
 
 impl Default for App {
@@ -212,6 +216,7 @@ impl Default for App {
             window: None,
             surface: None,
             scene: None,
+            hud: None,
             world: World::new(seed),
             seed,
             // LRU mesh cache: cap 200k chunks (~RAM-light) or 12 GB estimated, whichever first.
@@ -360,6 +365,10 @@ impl ApplicationHandler for App {
             .expect("scene init failed");
         log::info!("gpu_window: GPU scene initialized (format={:?})", format);
 
+        // Debug HUD: build once we have a device/queue/format (after scene takes
+        // ownership of the Arc<Device>/Arc<Queue> — borrow back from the scene).
+        let hud = hud::Hud::new(scene.device(), scene.queue(), format);
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -377,6 +386,7 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.surface = Some(surface);
         self.scene = Some(scene);
+        self.hud = Some(hud);
 
         // First-person spawn: drop the camera onto the terrain at the spawn chunk.
         // Spawn the 1.90 m avatar's feet on the terrain surface near the chunk (1,0,1)
@@ -778,7 +788,40 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         match scene.render_to_view(&tris, &self.camera, &view, self.time_of_day) {
-            Ok(()) => scene.queue().present(tex),
+            Ok(()) => {
+                // Debug HUD: update stats + draw top-right, then present.
+                if let Some(hud) = &mut self.hud {
+                    let dt = self.last_frame.elapsed().as_secs_f32().clamp(1e-4, 0.1);
+                    let fps = 1.0 / dt;
+                    let p = self.player.pos;
+                    let yaw_deg = self.yaw.to_degrees();
+                    let mode = match self.mode {
+                        voxel_player::PlayerMode::Walk => "WALK",
+                        voxel_player::PlayerMode::Fly => "FLY",
+                    };
+                    hud.update(
+                        scene.device(),
+                        scene.queue(),
+                        fps,
+                        p,
+                        yaw_deg,
+                        self.mesh_cache.len(),
+                        tris.len() / 3,
+                        self.seed,
+                        mode,
+                        self.time_of_day,
+                        self.surf_w,
+                        self.surf_h,
+                    );
+                    let mut enc = scene.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("hud-enc"),
+                        ..Default::default()
+                    });
+                    hud.draw(&mut enc, &view);
+                    scene.queue().submit(Some(enc.finish()));
+                }
+                scene.queue().present(tex)
+            }
             Err(err) => log::error!(
                 "gpu_window: render failed (tris={}, surface={}x{}): {err:#}",
                 tris.len(),
