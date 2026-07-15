@@ -163,3 +163,43 @@ fn hollow_shell_has_twelve_exposed_faces() {
     assert!((area - expected).abs() < expected * 0.02,
         "hollow shell area = 6*N^2 + 6*(N-2)^2: got {} expected {}", area, expected);
 }
+
+/// Vertex-AO (F5): a concave corner (where a solid neighbour overhangs a face corner)
+/// must darken that corner (ao < 1.0), while a fully isolated voxel in open air must have
+/// ao == 1.0 everywhere. This proves the mesher bakes ambient occlusion into the triangle
+/// vertices rather than leaving it flat.
+#[test]
+fn vertex_ao_darkens_concave_corner() {
+    // A 2x2 floor on y=0 with one voxel stacked on top at the (0,0) corner: the top face
+    // of the floor is one greedy quad, and the corner under the stacked voxel is concave
+    // (occluded by the overhang) -> its vertex AO must drop below 1.0.
+    let chunk = build_chunk(|x, y, z| {
+        (x <= 1 && z <= 1 && y == 0) || (x == 0 && y == 1 && z == 0)
+    });
+    let tris = greedy_mesh(&chunk);
+    assert!(!tris.is_empty(), "shape must produce some triangles");
+
+    let mut saw_concave = false;
+    for t in &tris {
+        let corners = [t.a, t.b, t.c];
+        for ao in t.ao.iter() {
+            if t.normal.y > 0.5 && *ao < 0.999 {
+                saw_concave = true;
+            }
+        }
+    }
+    assert!(saw_concave, "concave corner (under the overhang) must darken (ao < 1.0)");
+}
+
+#[test]
+fn vertex_ao_is_one_for_isolated_voxel() {
+    // A single voxel surrounded by air has no occluders -> every face corner AO == 1.0.
+    let chunk = build_chunk(|x, y, z| x == 0 && y == 0 && z == 0);
+    let tris = greedy_mesh(&chunk);
+    assert_eq!(tris.len(), 12, "single voxel => 12 triangles");
+    for t in &tris {
+        for ao in t.ao.iter() {
+            assert!((ao - 1.0).abs() < 1e-5, "isolated voxel corner AO must be 1.0, got {}", ao);
+        }
+    }
+}

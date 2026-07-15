@@ -145,6 +145,7 @@ mod tests {
             c: v,
             normal: Vec3::new(0.0, 1.0, 0.0),
             material: voxel_core::palette::MaterialId::from(2),
+            ao: [1.0; 3],
         }
     }
 

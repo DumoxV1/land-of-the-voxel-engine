@@ -58,6 +58,7 @@ pub fn render_world(chunks: &[(ChunkCoord, Chunk)], cam: &Camera, w: u32, h: u32
                 c: Vec3::new(t.c.x + ox, t.c.y + oy, t.c.z + oz),
                 normal: t.normal,
                 material: t.material,
+                ao: t.ao,
             });
         }
     }

@@ -26,6 +26,7 @@ pub struct GpuVertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub material: u32,
+    pub ao: [f32; 3],
 }
 
 /// Camera uniforms (view-projection + params) for the shader.
@@ -259,6 +260,11 @@ impl GpuScene {
                     format: wgpu::VertexFormat::Uint32,
                     offset: 24,
                     shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 28,
+                    shader_location: 3,
                 },
             ],
         };
@@ -533,6 +539,7 @@ impl GpuScene {
                     pos: [v.x, v.y, v.z],
                     normal: [t.normal.x, t.normal.y, t.normal.z],
                     material: t.material.0 as u32,
+                    ao: t.ao,
                 });
             }
         }
@@ -982,6 +989,7 @@ mod tests {
                     c: voxel_mesher::Vec3::new(4.0, 0.0, 4.0),
                     normal: voxel_mesher::Vec3::new(0.0, 1.0, 0.0),
                     material: voxel_core::palette::MaterialId::from(2u8),
+                    ao: [1.0; 3],
                 },
                 voxel_mesher::Triangle {
                     a: voxel_mesher::Vec3::new(0.0, 0.0, 0.0),
@@ -989,6 +997,7 @@ mod tests {
                     c: voxel_mesher::Vec3::new(4.0, 0.0, 0.0),
                     normal: voxel_mesher::Vec3::new(0.0, 1.0, 0.0),
                     material: voxel_core::palette::MaterialId::from(2u8),
+                    ao: [1.0; 3],
                 },
             ];
             // Camera at the proven live-client angle (yaw=-pi/2 looks down -Z), placed
@@ -1047,12 +1056,14 @@ struct VtxIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) @interpolate(flat) material: u32,
+    @location(3) @interpolate(flat) ao: vec3<f32>,
 };
 struct VtxOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) @interpolate(flat) material: u32,
     @location(2) world_pos: vec3<f32>,
+    @location(3) @interpolate(flat) ao: vec3<f32>,
 };
 
 @vertex
@@ -1062,6 +1073,7 @@ fn vs_main(in: VtxIn) -> VtxOut {
     o.normal = in.normal;
     o.material = in.material;
     o.world_pos = in.pos;
+    o.ao = in.ao;
     return o;
 }
 
@@ -1137,8 +1149,11 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     // Zachte key-light voor vorm, geen harde schaduwranden.
     let L = sun_dir;
     let diff = max(dot(n, L), 0.0) * day;
-    // Crevice-AO: donkere nagels in holtes/naadjes via dezelfde ruis (verschoven).
-    let ao = 0.75 + 0.25 * fract(sin(dot(floor(p * 2.0 + 7.0), vec3<f32>(12.9898, 78.233, 37.719))) * 43758.5453);
+    // Per-vertex AO (F5, baked in the mesher) darkens crevices/contact shadows; the
+    // fragment AO is the average of the 3 corner values. Keep the cheap value-noise ONLY
+    // as subtle per-voxel brightness jitter (breaks the 'plastic' look), not as AO.
+    let ao_corner = (in.ao.x + in.ao.y + in.ao.z) / 3.0;
+    let ao = ao_corner * (0.9 + 0.2 * h);   // AO modulated by subtle jitter
 
     var col = albedo * (hemi * (ambient + 0.55) + vec3<f32>(1.0, 0.96, 0.88) * 0.35 * diff) * ao;
     col += m.emissive.rgb * day;

@@ -27,7 +27,9 @@ impl Vec3 {
     }
 }
 
-/// A single triangle: three vertices sharing a normal and material id.
+/// A single triangle: three vertices sharing a normal and material id. `ao` holds the
+/// per-corner (a, b, c) vertex ambient occlusion in [0,1] (1.0 = fully lit / open sky,
+/// lower = crevice). Baked at mesh time (F5 vertex-AO, 0 runtime cost).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Triangle {
     pub a: Vec3,
@@ -35,6 +37,7 @@ pub struct Triangle {
     pub c: Vec3,
     pub normal: Vec3,
     pub material: MaterialId,
+    pub ao: [f32; 3],
 }
 
 /// View over a chunk's solidity and material, treating out-of-bounds as empty (air).
@@ -67,10 +70,51 @@ const FACES: [(i64, i64, i64, Vec3); 6] = [
     (0, 0, -1, Vec3::new(0.0, 0.0, -1.0)),
 ];
 
+/// Vertex ambient occlusion (F5, 0-fps method). For a face on solid voxel (x,y,z) with
+/// outward unit normal `n` and in-plane unit tangents `u`,`v`, compute AO at the corner
+/// (su,sv) in {0,1} (low/high edge along each tangent). Samples the three voxels that
+/// border that corner on the SOLID side (-n direction): the two edge voxels and the
+/// diagonal. Returns 0.4 (fully occluded crevice) .. 1.0 (open sky).
+fn corner_ao(
+    view: &VoxView,
+    x: i64,
+    y: i64,
+    z: i64,
+    n: Vec3,
+    u: (f64, f64, f64),
+    v: (f64, f64, f64),
+    su: i64,
+    sv: i64,
+) -> f32 {
+    // Step INTO the solid (opposite the outward face normal) for the occluder samples.
+    let nx = -n.x as f64;
+    let ny = -n.y as f64;
+    let nz = -n.z as f64;
+    let su_s = if su == 0 { -1.0f64 } else { 1.0 };
+    let sv_s = if sv == 0 { -1.0f64 } else { 1.0 };
+    let sx = (x as f64 + nx + u.0 * su_s) as i64;
+    let sy = (y as f64 + ny + u.1 * su_s) as i64;
+    let sz = (z as f64 + nz + u.2 * su_s) as i64;
+    let s1 = view.is_solid(sx, sy, sz) as u8;
+    let tx = (x as f64 + nx + v.0 * sv_s) as i64;
+    let ty = (y as f64 + ny + v.1 * sv_s) as i64;
+    let tz = (z as f64 + nz + v.2 * sv_s) as i64;
+    let s2 = view.is_solid(tx, ty, tz) as u8;
+    let cx = (x as f64 + nx + u.0 * su_s + v.0 * sv_s) as i64;
+    let cy = (y as f64 + ny + u.1 * su_s + v.1 * sv_s) as i64;
+    let cz = (z as f64 + nz + u.2 * su_s + v.2 * sv_s) as i64;
+    let c = view.is_solid(cx, cy, cz) as u8;
+    // Minecraft-style: if both edge voxels are solid the corner is fully occluded.
+    let occ = if s1 == 1 && s2 == 1 { 3u8 } else { s1 + s2 + c };
+    let t = occ as f32 / 3.0;
+    1.0 - 0.6 * t // 1.0 open .. 0.4 fully blocked
+}
+
 /// Emit two triangles for a quad on a face of voxel (x,y,z), given the face normal
 /// and the two in-plane tangent axes (u, v) with their lengths (du, dv).
 fn emit_quad(
     out: &mut Vec<(Triangle, MaterialId)>,
+    view: &VoxView,
     x: f64,
     y: f64,
     z: f64,
@@ -97,12 +141,32 @@ fn emit_quad(
     let gx = (u.1 * v.2 - u.2 * v.1) as f32;
     let gy = (u.2 * v.0 - u.0 * v.2) as f32;
     let gz = (u.0 * v.1 - u.1 * v.0) as f32;
+    // Per-corner vertex AO (F5), indexed by (su,sv) == (0,0),(1,0),(1,1),(0,1).
+    let vx = x as i64;
+    let vy = y as i64;
+    let vz = z as i64;
+    let ao_p0 = corner_ao(view, vx, vy, vz, normal, u, v, 0, 0);
+    let ao_p1 = corner_ao(view, vx, vy, vz, normal, u, v, 1, 0);
+    let ao_p2 = corner_ao(view, vx, vy, vz, normal, u, v, 1, 1);
+    let ao_p3 = corner_ao(view, vx, vy, vz, normal, u, v, 0, 1);
     if gx * normal.x + gy * normal.y + gz * normal.z >= 0.0 {
-        out.push((Triangle { a: p0, b: p1, c: p2, normal, material }, material));
-        out.push((Triangle { a: p0, b: p2, c: p3, normal, material }, material));
+        out.push((
+            Triangle { a: p0, b: p1, c: p2, normal, material, ao: [ao_p0, ao_p1, ao_p2] },
+            material,
+        ));
+        out.push((
+            Triangle { a: p0, b: p2, c: p3, normal, material, ao: [ao_p0, ao_p2, ao_p3] },
+            material,
+        ));
     } else {
-        out.push((Triangle { a: p0, b: p2, c: p1, normal, material }, material));
-        out.push((Triangle { a: p0, b: p3, c: p2, normal, material }, material));
+        out.push((
+            Triangle { a: p0, b: p2, c: p1, normal, material, ao: [ao_p0, ao_p2, ao_p1] },
+            material,
+        ));
+        out.push((
+            Triangle { a: p0, b: p3, c: p2, normal, material, ao: [ao_p0, ao_p3, ao_p2] },
+            material,
+        ));
     }
 }
 
@@ -119,7 +183,7 @@ pub fn naive_mesh(chunk: &Chunk) -> Vec<Triangle> {
                 }
                 let mat = view.material(x, y, z);
                 for (_, _, _, nrm) in FACES.iter() {
-                    emit_face(&mut out, x, y, z, *nrm, mat);
+                    emit_face(&mut out, &view, x, y, z, *nrm, mat);
                 }
             }
         }
@@ -143,7 +207,7 @@ pub fn culled_mesh(chunk: &Chunk) -> Vec<Triangle> {
                     if view.is_solid(x + dx, y + dy, z + dz) {
                         continue; // neighbour solid -> cull this face
                     }
-                    emit_face(&mut out, x, y, z, *nrm, mat);
+                    emit_face(&mut out, &view, x, y, z, *nrm, mat);
                 }
             }
         }
@@ -168,12 +232,12 @@ pub fn greedy_mesh(chunk: &Chunk) -> Vec<Triangle> {
 /// Emit a single unit face (quad = 2 triangles) on the `normal` side of voxel (x,y,z).
 /// A voxel at (x,y,z) fills [x,x+1)x[y,y+1)x[z,z+1): positive faces lie on the +1 planes
 /// (S-11 audit fix — previously all faces collapsed onto the min-corner planes).
-fn emit_face(out: &mut Vec<(Triangle, MaterialId)>, x: i64, y: i64, z: i64, normal: Vec3, material: MaterialId) {
+fn emit_face(out: &mut Vec<(Triangle, MaterialId)>, view: &VoxView, x: i64, y: i64, z: i64, normal: Vec3, material: MaterialId) {
     let (u, v) = tangent_basis(normal);
     let bx = x as f64 + if normal.x > 0.0 { 1.0 } else { 0.0 };
     let by = y as f64 + if normal.y > 0.0 { 1.0 } else { 0.0 };
     let bz = z as f64 + if normal.z > 0.0 { 1.0 } else { 0.0 };
-    emit_quad(out, bx, by, bz, normal, u, v, 1.0, 1.0, material);
+    emit_quad(out, view, bx, by, bz, normal, u, v, 1.0, 1.0, material);
 }
 
 /// Choose in-plane tangent unit vectors for a given axis-aligned normal.
@@ -248,7 +312,7 @@ fn greedy_layer(out: &mut Vec<(Triangle, MaterialId)>, view: &VoxView, axis: usi
                         h += 1;
                     }
                     // Emit one merged quad.
-                    emit_merged_quad(out, axis, u_axis, v_axis, d, i, j, h, w, normal, mat);
+                    emit_merged_quad(out, view, axis, u_axis, v_axis, d, i, j, h, w, normal, mat);
                     for ii in i..i + h {
                         for jj in j..j + w {
                             mask[ii * n + jj] = None;
@@ -289,6 +353,7 @@ fn other_axes(axis: usize) -> (usize, usize) {
 /// Emit a greedily-merged quad spanning h x w voxels in the layer plane.
 fn emit_merged_quad(
     out: &mut Vec<(Triangle, MaterialId)>,
+    view: &VoxView,
     axis: usize,
     u_axis: usize,
     v_axis: usize,
@@ -315,6 +380,7 @@ fn emit_merged_quad(
 
     emit_quad(
         out,
+        view,
         base[0],
         base[1],
         base[2],
