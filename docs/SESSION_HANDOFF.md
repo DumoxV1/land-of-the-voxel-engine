@@ -39,15 +39,27 @@ visueel goedgekeurd.
 ## Openstaande must-do stappen (WORKPLAN_5_STEPS.md)
 1. ✅ Stap 1 — crack-free skirts (gedaan, daarna uitgezet in render-pad wegens artefacten)
 2. ✅ Stap 2 — inter-chunk occlusie
-3. ⬜ **Stap 3 — BFS zonlicht-lighting** (grot/schaduw). Verse research nodig.
-4. ⬜ **Stap 4 — visuele juice**: skybox-gradient + distance-fog + materiaalkleuren. Creative UI → look eerst laten goedkeuren, tests achterhouden tot commit.
+3. ⬜ **Stap 3 — BFS zonlicht-lighting** (grot/schaduw). Skill `voxel-light-propagation`
+  dekt het (incl. `voxel-light` crate API, Seed-of-Andromeda algoritme). Verse research niet meer nodig.
+4. ⬜ **Stap 4 — visuele juice**: skybox-gradient + distance-fog + materiaalkleuren. Skill
+  `wgpu-render-pass-effects` dekt het (WGSL-patronen, fog/sky in de bestaande forward pass).
+  Creative UI → look eerst laten goedkeuren, tests achterhouden tot commit.
 5. ⬜ **Stap 5 — deterministic seed** + spawn-consistentie-test.
 
 ## Grote richting (nog te plannen)
 - **ADR-0006 ray-marching laag**: voxel DDA/ray-march in wgpu-compute als *additieve* filmische
-  laag (GEEN octree-rewrite, GEEN HW-DXR). Voor de Crimson Desert / Lay of the Land look.
+  laag (GEEN octree-rewrite, GEEN HW-DXR). Skill `voxel-ray-march-layer` dekt het; referentie
+  `github.com/russellocean/pebble-rs` (`shaders/raytracing.wgsl`, DDA + shadow-rays, 5 LOD).
+  Voor de Crimson Desert / Lay of the Land look.
 - **ADR-0004 client-shell**: status Proposed (Bevy/wgpu vs kaal wgpu). De client draait nu op
   kaal wgpu 30 + winit 0.30 — ADR bijwerken naar de feitelijke keuze.
+
+## Nieuwe skills deze sessie aangemaakt (voor reflectie)
+- `voxel-lod-floating-geometry-debug` — zwevende/misplaatste chunks in LOD-renderer (de sky-bug).
+- `wgpu-bitmap-hud-overlay` — FPS/stats HUD (eerder deze sessie).
+- `voxel-light-propagation` — BFS zonlicht/block-light (Stap 3).
+- `wgpu-render-pass-effects` — skybox/fog/materiaal in wgpu (Stap 4).
+- `voxel-ray-march-layer` — wgpu compute DDA ray-march laag (ADR-0006).
 
 ## Bekende quirks / valkuilen
 - **wgpu 30 API** wijkt sterk af van tutorials: descriptor-velden zijn deels `Option`/slices-of-Option
