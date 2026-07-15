@@ -102,7 +102,10 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       M4 P1 (BCn+mipmaps) of Fase-3 vertex-AO + schaduw + smooth voxels. Raytracing genoteerd
       als latere fase (zie roadmap — vereist andere pipeline dan huidige mesh-renderer).
 
-27h. ✅ P0 optimalisatie (2026-07-15): VBO-cap 256MB→2GB (TDD spike). `MAX_VBO_BYTES` const
+27i. ✅ P1 optimalisatie (2026-07-15): chunk-gen hot-path fix. `classify` herberekende
+      slope per voxel-Y (32x/kolom) = echte bottleneck. Slope één keer per kolom in
+      `generate_chunk`, als param aan `classify`. **3.185→0.226 ms/chunk (14x)**.
+      `chunk_gen_stays_fast` regression-test groen; 36/36 groen. Volgende: P2.
       + device `required_limits.max_buffer_size` gespiegeld. Geverifieerd: UNIQUE_COLORS
       3316→6366 (2× variatie), VBO-warn=0, 36/36 groen. Volgende: P1 fBm-profiling,
       P2 requested_gen-groeiguard (zie docs/OPTIMIZATION_BACKLOG.md).

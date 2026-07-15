@@ -27,15 +27,18 @@ wordt getruncate (geen crash, maar incomplete wereld bij grote view-distance).
   gespiegeld). Geverifieerd: spawn eye_y=41.25m, UNIQUE_COLORS 3316→**6366** (2x variatie),
   VBO-warn=0, 36/36 groen. Committed `25b415f..<nieuw>`.
 
-## P1 — Chunk-gen profilen + hot-path (fBm-kosten)
-- **Waar:** `crates/voxel-worldgen/src/lib.rs` `generate_chunk` + `fbm01` (5 octaves:
-  2048/512/128/32/4 voxels) x 32^3 voxels per chunk.
-- **Wat:** profileren (cargo-flamegraph / manual timer in `mesh_pool` job) om te zien of
-  fBm of `classify` dominant is. Opties: (a) fBm-resultaat cachen per (x,z) kolom (deel
-  kolommen tussen Y-slabs), (b) simpelere noise voor de fijnste octaaf, (c) genereer
-  kolom-hoogte één keer i.p.v. per Y-chunk.
-- **Win:** minder CPU per chunk -> snellere eerste load + hogere FPS bij beweging.
-- **Risico:** gemiddeld — raak de deterministiciteit niet (seed-invariant).
+## P1 — Chunk-gen profilen + hot-path (DONE 2026-07-15)
+- **Waar:** `crates/voxel-worldgen/src/lib.rs` `generate_chunk` + `classify`.
+- **Wat:** profileren toonde de echte bottleneck zat NIET in fBm-zwaarte maar in
+  `classify` dat de 4-buren slope **per voxel-Y** herberekende (32x per kolom =
+  ~131k fBm-calls/chunk). Refactor: slope één keer per kolom in `generate_chunk`
+  berekenen, als parameter aan `classify` geven. `classify(wx,wz,seed)` →
+  `classify(h, slope, biome)`.
+- **Win:** **3.185 ms → 0.226 ms/chunk (14x sneller)**. Eerste-load gen-tijd ~9.5s → ~0.7s.
+- **Verificatie:** `baseline_meter` (tijdelijk) mat 3.185→0.226 ms; regression-test
+  `chunk_gen_stays_fast` (200 chunks < 500ms) groen; 36/36 groen; live capture toonde
+  geen regressie (groen terrain + sky, VBO-warn=0, CLEAR=0%).
+- **STATUS: DONE.** Volgende: P2 (`requested_gen`/`pending` groeiguard).
 
 ## P2 — `requested_gen` / `pending` groeiguard
 - **Waar:** `gpu_window.rs` — `requested_gen: HashMap`, `pending: HashSet`; enkel gecleared

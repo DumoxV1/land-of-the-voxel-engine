@@ -2,7 +2,18 @@
 
 Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastgelegd.
 
-## 2026-07-15 — P0 optimalisatie: VBO-cap 256MB → 2GB (TDD spike)
+## 2026-07-15 — P1 optimalisatie: chunk-gen hot-path (14x sneller)
+
+- "Ga door" -> P1 (chunk-gen profiling). Verwachting was fBm-zwaarte; meting toonde
+  ANDERE bottleneck: `classify` herberekende de 4-buren slope **per voxel-Y** (32x per
+  kolom) = ~131k fBm-calls/chunk. `baseline_meter` (tijdelijk) mat **3.185 ms/chunk**.
+- Fix: slope één keer per kolom in `generate_chunk` berekenen, als param aan `classify`
+  geven. `classify(wx,wz,seed,biome)` -> `classify(h, slope, biome)`. Geen gedrags-
+  verandering (identieke slope-formule), alleen herstructurering.
+- Geverifieerd: **0.226 ms/chunk (14x)**; regression-test `chunk_gen_stays_fast`
+  (200 chunks < 500ms) groen; live capture geen regressie (groen terrain, VBO-warn=0,
+  CLEAR=0%); 36/36 groen.
+- Volgende: P2 (`requested_gen`/`pending` groeiguard).
 
 - User: "ga door" met zuivere optimalisatie. P0 = VBO-cap verhogen (snelste winst).
 - Rood→Groen: nieuw `vbo_cap_exceeds_legacy_256mb` test eist `MAX_VBO_BYTES > 256MB`.

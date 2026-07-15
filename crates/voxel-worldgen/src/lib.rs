@@ -35,9 +35,20 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
             // Surface height in WORLD-Y voxels (coord.y selects which 4 m slab this chunk is).
             let h = (surface_height_m(wx, wz, seed) / voxel_core::coords::VOXEL_SIZE_M) as i64;
             let biome = biome_at(wx, wz, seed);
+            // P1 spike (2026-07-15): slope computed ONCE per column here, not 32x inside
+            // `classify` (was the dominant hot-path — 4 fBm calls per ly = 131k fBm/chunk).
+            let slope = {
+                let hl = surface_height_m(wx - 1, wz, seed);
+                let hr = surface_height_m(wx + 1, wz, seed);
+                let hd = surface_height_m(wx, wz - 1, seed);
+                let hu = surface_height_m(wx, wz + 1, seed);
+                let dx = (hr - hl).abs();
+                let dz = (hu - hd).abs();
+                (dx + dz) / voxel_core::coords::VOXEL_SIZE_M
+            };
             for ly in 0..SIZE as u8 {
                 let wy = origin.y + ly as i64;
-                let m = classify(wy, h, wx, wz, seed, biome);
+                let m = classify(wy, h, slope, biome);
                 if m != AIR {
                     chunk.set(LocalVoxel::new(lx, ly, lz), MaterialId::from(m));
                 }
@@ -47,25 +58,13 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
     chunk
 }
 
-/// Classify a world-Y column into a material given the surface height `h`, the world X/Z
-/// (for slope), the seed, and the climate `biome`.
-///
-/// Surface material follows the biome (grass/sand/snow), with bare rock on steep slopes and
-/// stone beneath the topsoil.
-fn classify(wy: i64, h: i64, wx: i64, wz: i64, seed: u32, biome: Biome) -> u8 {
+/// Classify a world-Y column into a material given the surface height `h`, the precomputed
+/// `slope`, and the climate `biome`. Pure + cheap: NO height-field sampling (caller computes
+/// `slope` once per column — see `generate_chunk`).
+fn classify(wy: i64, h: i64, slope: f32, biome: Biome) -> u8 {
     if wy > h {
         return AIR;
     }
-    // Slope estimate via central differences of the height field (in voxels).
-    let slope = {
-        let hl = surface_height_m(wx - 1, wz, seed);
-        let hr = surface_height_m(wx + 1, wz, seed);
-        let hd = surface_height_m(wx, wz - 1, seed);
-        let hu = surface_height_m(wx, wz + 1, seed);
-        let dx = (hr - hl).abs();
-        let dz = (hu - hd).abs();
-        (dx + dz) / voxel_core::coords::VOXEL_SIZE_M
-    };
     // Steep exposure → bare rock regardless of biome.
     if slope >= 4.0 && wy >= h - 2 {
         return STONE;
@@ -183,6 +182,27 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    /// P1 spike (2026-07-15): chunk generation must stay fast. Regression guard against the
+    /// old hot-path where `classify` re-sampled the 4-neighbour height field PER VOXEL-Y
+    /// (32x per column) — that was ~3.2 ms/chunk. After hoisting slope to once-per-column it
+    /// is ~0.2 ms/chunk. 200 chunks must finish well under 500 ms (old code took ~640 ms).
+    #[test]
+    fn chunk_gen_stays_fast() {
+        let t0 = Instant::now();
+        for i in 0..200u32 {
+            let _ = generate_chunk(
+                ChunkCoord::new((i as i64) % 16, (i as i64 / 16) % 8, (i as i64) % 16),
+                7,
+            );
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            ms < 500.0,
+            "chunk gen too slow: {ms:.1} ms for 200 chunks (slope hot-path regression?)"
+        );
+    }
 
     /// Terrain must have multi-scale (fractal) relief: large hills AND fine detail, not a
     /// single noise scale. Measured in METERS via `surface_height_m` (the canonical
