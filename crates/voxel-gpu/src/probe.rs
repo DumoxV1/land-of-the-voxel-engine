@@ -42,16 +42,14 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
     );
 
     let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-                label: None,
-                trace: wgpu::Trace::Off,
-            },
-        )
+        .request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            memory_hints: wgpu::MemoryHints::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            label: None,
+            trace: wgpu::Trace::Off,
+        })
         .await
         .map_err(|e| anyhow::anyhow!("no device: {e:?}"))?;
 
@@ -120,9 +118,18 @@ pub async fn render_probe_png(path: &str) -> anyhow::Result<()> {
     });
 
     let verts = [
-        Vtx { pos: [0.0, 0.6, 0.0], color: [0.95, 0.75, 0.35] },
-        Vtx { pos: [-0.6, -0.4, 0.0], color: [0.35, 0.75, 0.95] },
-        Vtx { pos: [0.6, -0.4, 0.0], color: [0.55, 0.85, 0.45] },
+        Vtx {
+            pos: [0.0, 0.6, 0.0],
+            color: [0.95, 0.75, 0.35],
+        },
+        Vtx {
+            pos: [-0.6, -0.4, 0.0],
+            color: [0.35, 0.75, 0.95],
+        },
+        Vtx {
+            pos: [0.6, -0.4, 0.0],
+            color: [0.55, 0.85, 0.45],
+        },
     ];
     let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("probe-vbo"),

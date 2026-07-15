@@ -48,7 +48,22 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
 23. ✅ Mijlpaal 1 (2026-07-15): **space-crash gefixt**. `gpu_window` crashte bij Space (focus-wissel → `get_current_texture()` `Lost`/`Outdated`, surface nooit hersteld). Nu: herconfigureert bij `Lost`/`Outdated` op laatst bekende grootte + skipt; `Timeout`/`Occluded` → skipt. Gepushed (3d2157e).
 24. ✅ Mijlpaal 2 / S-12c deel 2 (2026-07-15): **lag fix P0+P1**. `Frustum` (6 planes uit view_proj, AABB-test) + unit-test (Rood→Groen) in `renderer.rs`; GPU buffer-pooling (één herbruikbare VBO via `write_buffer`, géén per-frame `create_buffer_init`). Client past frustum-culling per chunk toe. **61/61 tests groen** (60+1 nieuw). Bench 1 km²: **8,8 → 15,8 avg FPS** (p50 129→55 ms = 2,3×). Onderzoek (3 subagents): P0+P1 samen ~10–30× potentieel.
 25. ✅ Mijlpaal 3 / P3 (2026-07-15): **non-blocking rayon-meshing**. Dedicated `rayon::ThreadPool` (1 core vrij voor render) doet `generate_chunk`+`greedy_mesh` off-thread; `crossbeam_channel` stuurt kant-en-klare `Vec<Triangle>` + `generation` terug; `render_frame` vult `mesh_cache` uit de channel binnen per-frame `UPLOAD_BUDGET` (4), discardt stale via gen-counter (camera-beweging → gen+1 → oude in-flight result weg). Strict TDD: unit-test `mesh_chunk_offthread_streams_result` (Rood→Groen). **62/62 tests groen** (60+2 nieuw). Plan: docs/research/2026-07-15-milestone3-rayon-meshing.md. Render-thread blokkeert nooit meer op chunk-gen/mesh.
-26. 🐛 Hotfix (2026-07-15): **wit scherm na P3**. Root cause: eerste frames alle chunks `pending` (async workers nog niet klaar) → `tris.is_empty()` → `return` vóór surface-clear → wit scherm. Fix: "never go white" guard — `nearest_visible_chunk` (vrije fn, eigen frustum, geen `&self` borrow-conflict) mesht dichtstbijzijnde zichtbare chunk **synchroon** als frame-1 fallback; daarna async pool. `tris.is_empty()`-return verwijderd (surface altijd gecleard). Unit-test `drained_mesh_lands_in_cache_after_one_frame` (Rood→Groen) toonde eerst de bug en bewijst nu het contract. **63/63 tests groen** (60+3 nieuw). Gepushed.
+26. 🐛 Hotfix #1 (2026-07-15): **wit scherm na P3**. Root cause: eerste frames alle chunks `pending`
+      → `tris.is_empty()` → `return` vóór surface-clear → wit scherm. Fix: "never go white" guard
+      (sync fallback frame 1). **Deze fix was ONVOLLEDIG:** gebruiker bleef wit scherm zien
+      (PrintWindow-capture: 92,9% puur wit). Zie item 27 voor de echte rootcause.
+27. 🐛 Audit + Hotfix #2 (2026-07-15): **echte wit-scherm rootcause gevonden en gefixt**.
+      Onafhankelijke audit (2 subagents) + native window-capture bewezen dat 63/63 groene tests
+      een false positive waren voor de live client. Twee bewezen oorzaken, beiden Rood→Groen:
+      (a) coördinatenmix (camera-Y in voxels, AABB's in meters → frustum selecteert 0 chunks →
+      lege tris → render faalt → fout ingeslikt → nooit gepresenteerd → wit); (b) resize wijzigde
+      surface maar niet depth-texture. Fix: centraal contract `mesh_chunk_world_meters()` +
+      `spawn_eye_y_m()`; `GpuScene::resize()` vernieuwt width/height/depth samen; live renderfouten
+      gelogd i.p.v. ingeslikt. Nieuwe tests: `live_spawn_frustum_contains_at_least_one_world_chunk`,
+      `streamed_mesh_is_in_chunk_world_meters`, `resize_recreates_matching_depth_attachment`.
+      **Bewijs na fix: PrintWindow-capture 0,002% wit, 434 unieke kleuren, lucht+terrain zichtbaar.**
+      **65/65 tests groen** (60+5 nieuw). Benchmark herschreven naar echte 12,5 cm-schaal:
+      1 km² = 250×250 = 62.500 chunks, avg_fps≈3750 (RTX 4080). Volgende: Mijlpaal 4 (4K-textures).
 
 ## Auditwaarschuwing
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.

@@ -13,14 +13,14 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes};
 
-use voxel_core::coords::{ChunkCoord, CHUNK_SIZE};
+use voxel_core::coords::{chunk_m_size, ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M};
 use voxel_gpu::renderer::{GpuCamera, GpuScene};
-use voxel_gpu::{mesh_pool, MeshResult};
+use voxel_gpu::{mesh_chunk_world_meters, mesh_pool, spawn_eye_y_m, MeshResult};
 use voxel_mesher::Triangle;
 use voxel_world::World;
 
 /// View distance in chunks. On the 12.5 cm scale a 4 m chunk -> 32 chunks ~= 128 m view.
-const CHUNK_M: f32 = CHUNK_SIZE as f32 * 0.125; // 4 m (ADR-0005)
+const CHUNK_M: f32 = CHUNK_SIZE as f32 * VOXEL_SIZE_M; // 4 m (ADR-0005)
 const VIEW_RADIUS: i64 = 24; // ~96 m view radius
 /// Max chunks whose meshes we ingest from the worker channel per frame (P3 upload budget).
 const UPLOAD_BUDGET: usize = 4;
@@ -151,26 +151,24 @@ impl ApplicationHandler for App {
         let surface = instance
             .create_surface(window.clone())
             .expect("surface creation failed");
-        let adapter = futures::executor::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
+        let adapter =
+            futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
                 apply_limit_buckets: false,
-            },
-        ))
-        .expect("no adapter");
-        let (device, queue) = futures::executor::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
+            }))
+            .expect("no adapter");
+        let (device, queue) =
+            futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::downlevel_defaults(),
                 memory_hints: wgpu::MemoryHints::default(),
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 label: None,
                 trace: wgpu::Trace::Off,
-            },
-        ))
-        .expect("no device");
+            }))
+            .expect("no device");
         let device = std::sync::Arc::new(device);
         let queue = std::sync::Arc::new(queue);
 
@@ -188,14 +186,8 @@ impl ApplicationHandler for App {
         let surf_h = size.height.min(max_dim);
         self.max_dim = max_dim;
 
-        let scene = GpuScene::new_for_surface(
-            device,
-            queue,
-            surf_w,
-            surf_h,
-            format,
-        )
-        .expect("scene init failed");
+        let scene = GpuScene::new_for_surface(device, queue, surf_w, surf_h, format)
+            .expect("scene init failed");
         log::info!("gpu_window: GPU scene initialized (format={:?})", format);
 
         let config = wgpu::SurfaceConfiguration {
@@ -233,14 +225,14 @@ impl ApplicationHandler for App {
             }
         }
         // Eye ~3 voxels (37.5 cm) above the surface, at the chunk center.
-        let eye_x = 1.5 * CHUNK_SIZE as f32 * 0.125;
-        let eye_z = 1.5 * CHUNK_SIZE as f32 * 0.125;
-        self.camera.eye = [eye_x, (top + 3) as f32, eye_z];
+        let eye_x = 1.5 * chunk_m_size();
+        let eye_z = 1.5 * chunk_m_size();
+        self.camera.eye = [eye_x, spawn_eye_y_m(top, 3), eye_z];
         println!(
             "spawn: terrain top = {} voxels (~{:.2} m), eye_y = {:.2} m",
             top,
             top as f32 * 0.125,
-            (top + 3) as f32 * 0.125
+            spawn_eye_y_m(top, 3)
         );
 
         if let Some(w) = &self.window {
@@ -257,12 +249,15 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let (Some(scene), Some(surface)) = (&self.scene, &self.surface) {
+                if let (Some(scene), Some(surface)) = (&mut self.scene, &self.surface) {
+                    self.surf_w = size.width.max(1).min(self.max_dim);
+                    self.surf_h = size.height.max(1).min(self.max_dim);
+                    scene.resize(self.surf_w, self.surf_h);
                     let config = wgpu::SurfaceConfiguration {
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                         format: scene.format(),
-                        width: size.width.max(1).min(self.max_dim),
-                        height: size.height.max(1).min(self.max_dim),
+                        width: self.surf_w,
+                        height: self.surf_h,
                         present_mode: wgpu::PresentMode::Fifo,
                         alpha_mode: wgpu::CompositeAlphaMode::Opaque,
                         view_formats: vec![],
@@ -270,9 +265,7 @@ impl ApplicationHandler for App {
                         color_space: wgpu::SurfaceColorSpace::Auto,
                     };
                     surface.configure(scene.device(), &config);
-                    self.camera.aspect = size.width as f32 / size.height as f32;
-                    self.surf_w = size.width.max(1).min(self.max_dim);
-                    self.surf_h = size.height.max(1).min(self.max_dim);
+                    self.camera.aspect = self.surf_w as f32 / self.surf_h as f32;
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -386,25 +379,8 @@ impl App {
             self.pending.remove(&r.coord);
         }
 
-        // --- "Never go white" guard: seed at least one mesh synchronously so the surface
-        //     always clears + draws on the first frames (before async workers deliver).
-        //     P3 async meshing takes over from the next frame. The helper builds its own
-        //     frustum, so no borrow conflict with the draw-loop's frustum below.
-        let [ex0, _ey0, ez0] = self.camera.eye;
-        let ccx0 = (ex0 / CHUNK_M).floor() as i64;
-        let ccz0 = (ez0 / CHUNK_M).floor() as i64;
-        let half0 = CHUNK_M * 0.5;
-        let half_y0 = CHUNK_M * 1.5;
-        let mut tris: Vec<Triangle> = Vec::new();
-        let vp = self.camera.view_proj();
-        if let Some(coord) = nearest_visible_chunk(&vp, half0, half_y0, ccx0, ccz0) {
-            let chunk = self.world.get_or_generate(coord);
-            let m = voxel_mesher::greedy_mesh(&chunk);
-            self.mesh_cache.insert(coord, m.clone());
-            tris.extend_from_slice(&m);
-        }
-
         // --- Chunk-streaming: draw visible chunks; request missing ones off-thread. ---
+        let mut tris: Vec<Triangle> = Vec::new();
         let [ex, _ey, ez] = self.camera.eye;
         let ccx = (ex / CHUNK_M).floor() as i64;
         let ccz = (ez / CHUNK_M).floor() as i64;
@@ -441,7 +417,7 @@ impl App {
                     self.mesh_pool.spawn(move || {
                         // CPU-only: pure worldgen + meshing, never touches the GPU.
                         let chunk = voxel_worldgen::generate_chunk(coord, seed);
-                        let tris = voxel_mesher::greedy_mesh(&chunk);
+                        let tris = mesh_chunk_world_meters(&chunk);
                         let _ = tx.send(MeshResult { coord, gen, tris });
                     });
                 }
@@ -449,36 +425,57 @@ impl App {
             }
         }
 
+        // Frame-1 fallback only: seed one visible chunk while async jobs are still pending.
+        if tris.is_empty() {
+            let vp = self.camera.view_proj();
+            if let Some(coord) = nearest_visible_chunk(&vp, half, half_y, ccx, ccz) {
+                let chunk = self.world.get_or_generate(coord);
+                let mesh = mesh_chunk_world_meters(&chunk);
+                self.mesh_cache.insert(coord, mesh.clone());
+                tris.extend_from_slice(&mesh);
+            }
+        }
+
         let frame = surface.get_current_texture();
         let tex = match frame {
-            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                t
-            }
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             // Surface lost / outdated (focus change, minimize, GPU reset, or the
             // OS snapping the window when Space is pressed): reconfigure at the
             // last known size and skip this frame instead of crashing.
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                 if let (Some(scene), Some(surface)) = (&self.scene, &self.surface) {
-                    surface.configure(scene.device(), &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        format: scene.format(),
-                        width: self.surf_w.max(1),
-                        height: self.surf_h.max(1),
-                        present_mode: wgpu::PresentMode::Fifo,
-                        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-                        view_formats: vec![],
-                        desired_maximum_frame_latency: 2,
-                        color_space: wgpu::SurfaceColorSpace::Auto,
-                    });
+                    surface.configure(
+                        scene.device(),
+                        &wgpu::SurfaceConfiguration {
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            format: scene.format(),
+                            width: self.surf_w.max(1),
+                            height: self.surf_h.max(1),
+                            present_mode: wgpu::PresentMode::Fifo,
+                            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                            view_formats: vec![],
+                            desired_maximum_frame_latency: 2,
+                            color_space: wgpu::SurfaceColorSpace::Auto,
+                        },
+                    );
                 }
                 return;
             }
             // Timeout / Occluded / Validation: transient, just skip the frame.
             _ => return,
         };
-        let view = tex.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        if scene.render_to_view(&tris, &self.camera, &view).is_ok() {
-            scene.queue().present(tex);
+        let view = tex
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        match scene.render_to_view(&tris, &self.camera, &view) {
+            Ok(()) => scene.queue().present(tex),
+            Err(err) => log::error!(
+                "gpu_window: render failed (tris={}, surface={}x{}): {err:#}",
+                tris.len(),
+                self.surf_w,
+                self.surf_h
+            ),
         }
     }
 }

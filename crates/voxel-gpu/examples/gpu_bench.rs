@@ -1,37 +1,46 @@
-//! Fase-2 benchmark-gate: meet de GPU-client FPS op een 1 km² wereld (RTX 4080).
+//! Benchmark-gate op de productieschaal: 12,5 cm/voxel, 4 m/chunk (ADR-0005).
 //!
-//! Bouwt een `side x side` chunk-wereld (default 32x32 = ~1 km² bij 32 m/chunk),
-//! rendert alleen chunks binnen een view-distance (`radius`) rond een bewegende
-//! camera (view-distance chunk-streaming, S-12 deel 3 / advies #2), en meet de
-//! frametime over `frames` frames. Schrijft p50/p95/p99 + avg FPS naar JSON.
+//! Bouwt een `side x side` chunk-wereld, rendert alleen chunks binnen een view-distance
+//! (`radius`) rond een bewegende camera, en meet frametime over `frames` frames.
+//! Gebruikt dezelfde frustum-culling + wereldmeter-mesh als de live client, zodat de
+//! benchmark de werkelijke renderkosten meet (niet "alle triangles ingeslikt").
+//!
+//! Schaal-feit: 1 chunk = 32^3 voxels * 0,125 m = 4 m. Een 250x250 grid = 62.500 chunks
+//! = exact 1 km². De oude bench gebruikte 32 m/chunk en noemde 32x32 ten onrechte 1 km².
 //!
 //! Run: cargo run --release --example gpu_bench -p voxel-gpu -- [side] [radius] [frames] [w] [h]
-//! Voorbeeld (1 km²): cargo run --release --example gpu_bench -p voxel-gpu -- 32 8 300
+//! Voorbeeld (1 km²): cargo run --release --example gpu_bench -p voxel-gpu -- 250 24 300
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use voxel_core::coords::ChunkCoord;
-use voxel_gpu::renderer::{GpuCamera, GpuScene};
-use voxel_mesher::greedy_mesh;
+use voxel_gpu::renderer::{Frustum, GpuCamera, GpuScene};
+use voxel_gpu::mesh_chunk_world_meters;
 use voxel_mesher::Triangle;
 use voxel_world::World;
 
-const CHUNK: f32 = 32.0; // 1 voxel = 1 m, 1 chunk = 32 m (wereldgen schaal)
+const CHUNK_M: f32 = 4.0; // 12.5 cm/voxel * 32 voxels = 4 m (ADR-0005)
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let side = args.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(32);
-    let radius = args.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(60);
+    let side = args.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(250);
+    let radius = args.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(24);
     let frames = args.get(3).and_then(|s| s.parse::<usize>().ok()).unwrap_or(300);
     let w = args.get(4).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1024);
     let h = args.get(5).and_then(|s| s.parse::<u32>().ok()).unwrap_or(768);
 
+    // Echte oppervlakte: side*CHUNK_M meter zijde -> m². 250*4 = 1000 m = 1 km².
+    let world_edge_m = side as f32 * CHUNK_M;
+    let world_area_m2 = world_edge_m * world_edge_m;
+
     println!(
-        "bench: side={} ({} chunks ~ {:.0} km²), radius={} chunks, frames={}, target={}x{}",
+        "bench: side={} ({} chunks, edge={:.0} m, area={:.0} m² = {:.4} km²), radius={} chunks, frames={}, target={}x{}",
         side,
         side * side,
-        (side * side) as f32 * CHUNK * CHUNK / 1_000_000.0,
+        world_edge_m,
+        world_area_m2,
+        world_area_m2 / 1_000_000.0,
         radius,
         frames,
         w,
@@ -47,30 +56,42 @@ fn main() {
         // Mesh-cache per chunk (streaming: mesh elke chunk slechts één keer).
         let mut mesh_cache: HashMap<ChunkCoord, Vec<Triangle>> = HashMap::new();
 
-        // Camera anchor: a fixed spot INSIDE the world bounds (not its center),
-        // so the streamer only ever generates chunks within [0, side). The orbit
-        // stays within radius of the anchor, clamped to the world edge.
-        let anchor_cx = (radius + 2).min(side - radius - 1).max(radius);
-        let anchor_cz = anchor_cx;
-        let mid = anchor_cx as f32 * CHUNK;
-        let mut cam = GpuCamera::new([mid, 50.0, mid], -std::f32::consts::FRAC_PI_2, -0.6, w as f32 / h as f32);
-        let eye_y = 50.0; // ~6.25 m, above the ~4 m (32-voxel) terrain on the 12.5 cm scale
-        let orbit_r = (radius as f32) * CHUNK * 0.5; // path well inside the world
+        // Camera anchor binnen wereldgrenzen; orbit binnen radius.
+        let anchor_cx = if side > 2 * radius + 2 {
+            (radius + 2).min(side - radius - 1).max(radius)
+        } else {
+            // Kleine grids: centreer binnen de wereld en beperk orbit tot de helft.
+            (side / 2).max(1).min(side - 1)
+        };
+        let mid = anchor_cx as f32 * CHUNK_M;
+        // Spawn-hoogte zoals de client: terrain-top (28 voxels) + 3 clearance, * 0.125.
+        let eye_y = (28 + 3) as f32 * 0.125;
+        let mut cam = GpuCamera::new(
+            [mid, eye_y, mid],
+            -std::f32::consts::FRAC_PI_2,
+            -0.6,
+            w as f32 / h as f32,
+        );
+        // Orbit binnen de wereld houden: bij kleine grids de straal beperken.
+        let orbit_r = ((radius as f32) * CHUNK_M * 0.5).min(mid.max(1.0) - CHUNK_M);
 
         let mut frame_times: Vec<f64> = Vec::with_capacity(frames);
         let mut total_visible = 0usize;
 
         for f in 0..frames {
-            // Beweeg de camera in een cirkel (stress voor streaming + frametime).
             let t = f as f32 / 60.0;
             let ex = mid + orbit_r * t.cos();
             let ez = mid + orbit_r * t.sin();
             cam.eye = [ex, eye_y, ez];
+            let vp = cam.view_proj();
+            let frustum = Frustum::from_view_proj(&vp);
 
-            // View-distance-streamer: verzamel zichtbare chunk-coords binnen `radius`.
-            let ccx = (ex / CHUNK).floor() as i64;
-            let ccz = (ez / CHUNK).floor() as i64;
-            let mut coords: Vec<ChunkCoord> = Vec::new();
+            let ccx = (ex / CHUNK_M).floor() as i64;
+            let ccz = (ez / CHUNK_M).floor() as i64;
+            let half = CHUNK_M * 0.5;
+            let half_y = CHUNK_M * 1.5;
+
+            let mut visible: Vec<Triangle> = Vec::new();
             for dx in -radius..=radius {
                 for dz in -radius..=radius {
                     let cx = ccx + dx;
@@ -78,17 +99,24 @@ fn main() {
                     if cx < 0 || cz < 0 || cx >= side || cz >= side {
                         continue;
                     }
-                    coords.push(ChunkCoord::new(cx, 0, cz));
+                    let coord = ChunkCoord::new(cx, 0, cz);
+                    // Frustum-culling, identiek aan de client.
+                    if !frustum.intersects_aabb(
+                        [
+                            (cx as f32 + 0.5) * CHUNK_M,
+                            half_y,
+                            (cz as f32 + 0.5) * CHUNK_M,
+                        ],
+                        half,
+                    ) {
+                        continue;
+                    }
+                    let entry = mesh_cache.entry(coord).or_insert_with(|| {
+                        let chunk = world.get_or_generate(coord);
+                        mesh_chunk_world_meters(&chunk)
+                    });
+                    visible.extend_from_slice(entry);
                 }
-            }
-            // Mesh (met cache) en bouw de zichtbare triangle-lijst buiten de cache-borrow.
-            let mut visible: Vec<Triangle> = Vec::new();
-            for coord in &coords {
-                let entry = mesh_cache.entry(*coord).or_insert_with(|| {
-                    let chunk = world.get_or_generate(*coord);
-                    greedy_mesh(&chunk)
-                });
-                visible.extend_from_slice(entry);
             }
             total_visible += visible.len();
 
@@ -118,7 +146,6 @@ fn main() {
             0.0
         };
         let avg_fps = if avg_ms > 0.0 { 1000.0 / avg_ms } else { 0.0 };
-
         let avg_visible = if frames > 0 {
             total_visible / frames
         } else {
@@ -130,11 +157,31 @@ fn main() {
             n, p50, p95, p99, avg_ms, avg_fps, avg_visible
         );
 
-        // Minimale handmatige JSON (geen serde-dep nodig).
         let json = format!(
-            "{{\n  \"spike\": \"S-12c-fase2-benchmark-gate\",\n  \"gpu\": \"RTX 4080 Super\",\n  \"side_chunks\": {},\n  \"world_area_m2\": {},\n  \"view_radius_chunks\": {},\n  \"frames\": {},\n  \"render_w\": {},\n  \"render_h\": {},\n  \"avg_visible_triangles\": {},\n  \"p50_ms\": {:.3},\n  \"p95_ms\": {:.3},\n  \"p99_ms\": {:.3},\n  \"avg_ms\": {:.3},\n  \"avg_fps\": {:.2}\n}}\n",
+            "{{
+  \"spike\": \"S-12c-fase2-benchmark-gate\",
+  \"gpu\": \"RTX 4080 Super\",
+  \"scale\": \"12.5cm-voxel-4m-chunk\",
+  \"side_chunks\": {},
+  \"world_edge_m\": {},
+  \"world_area_m2\": {},
+  \"world_area_km2\": {:.4},
+  \"view_radius_chunks\": {},
+  \"frames\": {},
+  \"render_w\": {},
+  \"render_h\": {},
+  \"avg_visible_triangles\": {},
+  \"p50_ms\": {:.3},
+  \"p95_ms\": {:.3},
+  \"p99_ms\": {:.3},
+  \"avg_ms\": {:.3},
+  \"avg_fps\": {:.2}
+}}
+",
             side,
-            (side * side) as f32 * CHUNK * CHUNK,
+            world_edge_m,
+            world_area_m2,
+            world_area_m2 / 1_000_000.0,
             radius,
             n,
             w,

@@ -2,6 +2,29 @@
 
 Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastgelegd.
 
+## 2026-07-15 — audit: wit scherm was echte bug, tests gaven false positive
+
+- Gebruiker rapporteerde blijvend wit scherm na de "never go white" hotfix.
+- Verificatie via **native window-capture** (Python `win32gui.PrintWindow` op de echte
+  `gpu_window.exe`, niet de offscreen smoke): **92,9% van het venster was puur wit**,
+  géén clear-kleur, géén terrain. Eerdere 63/63 groene tests waren dus een **false positive**
+  voor de live client.
+- Onafhankelijke audit (2 subagents) bevestigde de rootcause-keten zonder de code te wijzigen:
+  **camera-Y in voxels → frustum vindt 0 chunks → lege tris → render faalt → fout ingeslikt
+  met `.is_ok()` → nooit gepresenteerd → wit window**. Tweede fout: resize wijzigde de
+  surface maar niet de depth-texture.
+- Fix strict TDD: twee Rood→Groen tests (`live_spawn_frustum_contains_at_least_one_world_chunk`,
+  `streamed_mesh_is_in_chunk_world_meters`) + `resize_recreates_matching_depth_attachment`.
+  Centraal coördinatencontract: `mesh_chunk_world_meters()` + `spawn_eye_y_m()`; alle chunkmeshes
+  krijgen nu `(chunk_origin + local) * 0,125` meter. Live renderfouten worden gelogd.
+- **Bewijs na fix:** PrintWindow-capture toont 0,002% wit, 434 unieke kleuren, lucht + terrain
+  zichtbaar. Workspace 65/65 groen. Benchmark herschreven naar echte 12,5 cm-schaal:
+  1 km² = 250×250 = 62.500 chunks, avg_fps≈3750 (RTX 4080).
+- **Les (toegevoegd aan AGENTS.md-werkprotocol):** offscreen/smoke-tests zijn GEEN bewijs voor
+  de live window/surface/present-flow. Voeg een pixel-oracle of native window-capture toe aan de
+  verificatie van elke render-path-change. `.is_ok()` rond presentatie mag nooit een fout maskeren.
+- Planstatus: aligned. Volgende stap (Mijlpaal 4, 4K-textures) mag starten.
+
 ## 2026-07-14 — initialisatie
 - Canoniek plan bevestigd.
 - North star toegevoegd: filmische openwereldkwaliteit geïnspireerd door de ambitie van GTA VI / Crimson Desert, zonder assets of ontwerpen te kopiëren.

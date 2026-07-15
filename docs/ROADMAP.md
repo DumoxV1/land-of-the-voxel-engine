@@ -72,21 +72,47 @@ Bevy/wgpu (ADR-0004, status Proposed).
       `mesh_chunk_offthread_streams_result` (Rood→Groen). **62/62 tests groen.** Plan in
       `docs/milestone3-rayon-meshing.md`; afgeleid uit 3e subagent-onderzoek. Volgende:
       Mijlpaal 4 = 4K-texture-system (texture-arrays + PBR + triplanar, wgpu 0.30).
-- [x] **Hotfix (2026-07-15): wit scherm na P3**. Regressie: eerste frames alle chunks `pending`
-      → `tris.is_empty()` → `return` vóór surface-clear → wit. Fix: "never go white" guard —
-      `nearest_visible_chunk` (vrije fn, eigen frustum) mesht dichtstbijzijnde zichtbare chunk
-      **synchroon** als fallback frame 1; daarna async pool. `tris.is_empty()`-return verwijderd
-      (surface altijd gecleard). Unit-test `drained_mesh_lands_in_cache_after_one_frame`
-      (Rood→Groen) bewijst mesh-landt-uiteindelijk-in-cache. **63/63 tests groen.**
+- [x] **Hotfix (2026-07-15, 1e poging): wit scherm na P3**. Regressie: eerste frames alle chunks
+      `pending` → `tris.is_empty()` → `return` vóór surface-clear → wit. Eerste fix: "never go white"
+      guard — `nearest_visible_chunk` (vrije fn, eigen frustum) mesht dichtstbijzijnde zichtbare
+      chunk **synchroon** als fallback frame 1; daarna async pool. `tris.is_empty()`-return
+      verwijderd. Unit-test `drained_mesh_lands_in_cache_after_one_frame` (Rood→Groen). 63/63 groen.
+      **Deze fix was ONVOLLEDIG:** de gebruiker bleef een wit scherm zien (geverifieerd via
+      PrintWindow-capture: 92,9% puur wit). Zie onderstaande audit voor de echte rootcause.
+- [x] **Audit + wit-scherm ROOTCAUSE (2026-07-15, 2e fix):** onafhankelijke audit (2 subagents) +
+      native window-capture toonden dat de client **echt** wit bleef terwijl 63/63 tests groen
+      waren. Twee bewezen rootcauses, beiden met Rood→Groen tests:
+      1. **Coördinatenmix (voxels vs meters):** camera-Y stond in voxels (`top+3 ≈ 31`) terwijl
+         chunk-AABB's in meters rond y=6 stonden → frustum selecteerde **0 chunks** → lege tris →
+         `render_to_view` faalde → fout ingeslikt met `.is_ok()` → nooit gepresenteerd → wit.
+         Fix: één centraal contract via `mesh_chunk_world_meters()` + `spawn_eye_y_m()`;
+         chunkmesh = `(chunk_origin + local) * 0,125` meter. Tests:
+         `live_spawn_frustum_contains_at_least_one_world_chunk`,
+         `streamed_mesh_is_in_chunk_world_meters` (Rood→Groen).
+      2. **Resize/depth-mismatch:** `WindowEvent::Resized` wijzigde de surface maar niet de depth-
+         texture (bij de RTX-clients volgen bij opstart DPI-resizes 2048×1400→1459→1400). Fix:
+         `GpuScene::resize()` vernieuwt width/height/depth samen; live `Resized` gebruikt het.
+         Test: `resize_recreates_matching_depth_attachment` (Rood→Groen).
+      Verder: live renderfouten worden nu gelogd i.p.v. ingeslikt; sync-fallback loopt alleen nog
+      bij lege `tris`. **Bewijs na fix: PrintWindow-capture toont 0,002% wit, 434 unieke kleuren,
+      lucht + terrain zichtbaar.** 65/65 tests groen (was 63). **Volgende: Mijlpaal 4 (4K-textures).**
+- [x] **Benchmark-correctie (2026-07-15):** `gpu_bench.rs` herschreven naar de echte 12,5 cm-schaal
+      (4 m/chunk, frustum-culling zoals de client, `mesh_chunk_world_meters`, correcte `eye_y`).
+      Oude meting (32 m/chunk, "1 km²"=32×32) was fout. **Nieuwe meting op 1 km² (250×250=62.500
+      chunks):** p50=0,24 ms, p95=0,51 ms, avg_fps≈3750, ~3.038 zichtbare tris/frame (RTX 4080,
+      1024×768). Stress: `client_smoke` 3× stabiel, 120/120 frames, géén panic. Zie
+      `crates/voxel-gpu/bench_1km2.json`.
 - [x] **Fase-2 benchmark-gate**: B-06 replay + B-07 soak + FPS op 1 km² vóór ADR-0004 lock-in.
       **S-12c deel 1 GEDAAN (2026-07-15):** GPU-benchmark-harness (`examples/gpu_bench.rs` +
       `GpuScene::render_triangles` offscreen-pad) meet FPS op 1 km² (1024 chunks, RTX 4080).
-      **Uitslag: 8,8 avg FPS bij 1,25 M zichtbare tris/frame (p50 129 ms, p95 141 ms)** —
-      gate **NIET gehaald**. Oorzaak = scene-samenstelling (geen frustum-culling, geeen
-      distance-budget, per-frame VBO), niet de renderer-pipeline. **S-12c deel 2**: frustum-culling
-      + triangle-distance-budget + buffer-pooling toevoegen aan de streamer, dan hermeten.
+      **Uitslag: 8,8 avg FPS bij 1,25 M zichtbare tris/frame (p50 129 ms, p95 141 ms)** — gate
+      **NIET gehaald**. Oorzaak = scene-samenstelling (geen frustum-culling, geen distance-budget,
+      per-frame VBO), niet de renderer-pipeline. **S-12c deel 2**: frustum-culling + triangle-
+      distance-budget + buffer-pooling toevoegen aan de streamer, dan hermeten.
       Zie `docs/benchmarks/2026-07-15-fase2-fps-1km2.md`. ADR-0004 lock-in uitgesteld
-      totdat de scene efficienter is.
+      totdat de scene efficienter is. **CORRIGENDUM (2026-07-15, audit):** die meting was op de
+      *oude* 32 m/chunk-schaal (`CHUNK=32.0`) en noemde 32×32 ten onrechte 1 km²; op de 12,5 cm-
+      schaal (4 m/chunk) is 1 km² = 250×250 = 62.500 chunks. Zie `bench_1km2.json` (nieuw).
 - [x] **S-13 micro-voxel resolutie (12,5 cm) — ADR-0005 (2026-07-15):** `voxel-core::coords`
       kreeg `VOXEL_SIZE_M = 0,125` (12,5 cm, binnen gebruikersband 9,5–13,5 cm) +
       `chunk_m_size() = 4 m`. 1 km² = **62.500 chunks** (was 1.024). Strict TDD:

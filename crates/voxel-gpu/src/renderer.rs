@@ -12,7 +12,6 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use voxel_core::palette::MaterialId;
 use voxel_mesher::Triangle;
-use wgpu::util::DeviceExt;
 
 /// Per-vertex data uploaded to the GPU.
 #[repr(C)]
@@ -29,7 +28,7 @@ pub struct GpuVertex {
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub fog_color: [f32; 4],
-    pub params: [f32; 4], // x = fog_density
+    pub params: [f32; 4],  // x = fog_density
     pub eye_pos: [f32; 4], // xyz = camera eye (fog distance reference), w unused
 }
 
@@ -75,15 +74,15 @@ impl GpuCamera {
 /// Canonical ids follow voxel-worldgen: 1 = DIRT, 2 = GRASS, 3 = STONE.
 pub fn material_tint(mat: MaterialId) -> [f32; 3] {
     match mat.0 {
-        0 => [0.0, 0.0, 0.0],        // air
-        1 => [0.52, 0.36, 0.22],     // dirt (warm brown)
-        2 => [0.42, 0.62, 0.28],     // grass (warm green)
-        3 => [0.50, 0.50, 0.52],     // stone (cool grey)
-        4 => [0.78, 0.80, 0.85],     // metal (light steel)
-        5 => [0.45, 0.30, 0.18],     // wood (dark warm)
-        6 => [0.30, 0.55, 0.25],     // leaf (green)
-        7 => [0.85, 0.78, 0.55],     // sand (warm)
-        _ => [0.6, 0.6, 0.65],       // fallback
+        0 => [0.0, 0.0, 0.0],    // air
+        1 => [0.52, 0.36, 0.22], // dirt (warm brown)
+        2 => [0.42, 0.62, 0.28], // grass (warm green)
+        3 => [0.50, 0.50, 0.52], // stone (cool grey)
+        4 => [0.78, 0.80, 0.85], // metal (light steel)
+        5 => [0.45, 0.30, 0.18], // wood (dark warm)
+        6 => [0.30, 0.55, 0.25], // leaf (green)
+        7 => [0.85, 0.78, 0.55], // sand (warm)
+        _ => [0.6, 0.6, 0.65],   // fallback
     }
 }
 
@@ -125,16 +124,14 @@ impl GpuScene {
             .await
             .expect("no adapter (GPU unavailable?)");
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults(),
-                    memory_hints: wgpu::MemoryHints::default(),
-                    label: None,
-                    experimental_features: wgpu::ExperimentalFeatures::default(),
-                    trace: wgpu::Trace::Off,
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                memory_hints: wgpu::MemoryHints::default(),
+                label: None,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+                trace: wgpu::Trace::Off,
+            })
             .await
             .map_err(|e| anyhow::anyhow!("no device: {e:?}"))?;
         Ok((Arc::new(device), Arc::new(queue)))
@@ -148,26 +145,24 @@ impl GpuScene {
             label: Some("voxel-shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(VOXEL_WGSL)),
         });
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("camera-bgl"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("voxel-pipeline-layout"),
-                bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: 0,
-            });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("camera-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("voxel-pipeline-layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
         let vbuf_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -281,6 +276,18 @@ impl GpuScene {
         &self.queue
     }
 
+    /// Resize all render-target-dependent state together. Surface callers must configure the
+    /// surface to the same dimensions immediately after this call.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(1);
+        self.height = height.max(1);
+        self.depth_view = Self::make_depth(&self.device, self.width, self.height);
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     /// Build a window pipeline variant for the given surface format. The caller must supply
     /// the `device`/`queue` obtained from an adapter that is compatible with the surface
     /// (the surface and device must share the same wgpu `Instance`).
@@ -355,7 +362,8 @@ impl GpuScene {
                 b
             }
         };
-        self.queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&verts));
+        self.queue
+            .write_buffer(&vbuf, 0, bytemuck::cast_slice(&verts));
 
         let cu = CameraUniform {
             view_proj: camera.view_proj(),
@@ -489,9 +497,7 @@ impl GpuScene {
         slice.map_async(wgpu::MapMode::Read, move |res| {
             let _ = tx.send(res);
         });
-        let _ = self
-            .device
-            .poll(wgpu::PollType::wait_indefinitely());
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv()
             .map_err(|_| anyhow::anyhow!("map channel closed"))?
             .map_err(|e| anyhow::anyhow!("map failed: {e:?}"))?;
@@ -594,17 +600,42 @@ impl Frustum {
         // left, right, bottom, top, near, far (WebGPU z in [0,1])
         let planes = [
             // left  = row3 + row0
-            glam::Vec4::new(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0], m[3][3] + m[3][0]),
+            glam::Vec4::new(
+                m[0][3] + m[0][0],
+                m[1][3] + m[1][0],
+                m[2][3] + m[2][0],
+                m[3][3] + m[3][0],
+            ),
             // right = row3 - row0
-            glam::Vec4::new(m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0], m[3][3] - m[3][0]),
+            glam::Vec4::new(
+                m[0][3] - m[0][0],
+                m[1][3] - m[1][0],
+                m[2][3] - m[2][0],
+                m[3][3] - m[3][0],
+            ),
             // bottom= row3 + row1
-            glam::Vec4::new(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1], m[3][3] + m[3][1]),
+            glam::Vec4::new(
+                m[0][3] + m[0][1],
+                m[1][3] + m[1][1],
+                m[2][3] + m[2][1],
+                m[3][3] + m[3][1],
+            ),
             // top   = row3 - row1
-            glam::Vec4::new(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1], m[3][3] - m[3][1]),
+            glam::Vec4::new(
+                m[0][3] - m[0][1],
+                m[1][3] - m[1][1],
+                m[2][3] - m[2][1],
+                m[3][3] - m[3][1],
+            ),
             // near  = row2            (WebGPU z in [0,1])
             glam::Vec4::new(m[0][2], m[1][2], m[2][2], m[3][2]),
             // far   = row3 - row2
-            glam::Vec4::new(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]),
+            glam::Vec4::new(
+                m[0][3] - m[0][2],
+                m[1][3] - m[1][2],
+                m[2][3] - m[2][2],
+                m[3][3] - m[3][2],
+            ),
         ];
         Self { planes }
     }
@@ -641,11 +672,61 @@ mod tests {
         let vp = cam.view_proj();
         let f = Frustum::from_view_proj(&vp);
         // Chunk 10 m in front (-Z) -> visible.
-        assert!(f.intersects_aabb([0.0, 0.0, -10.0], 2.0), "chunk in front (-Z) should be visible");
+        assert!(
+            f.intersects_aabb([0.0, 0.0, -10.0], 2.0),
+            "chunk in front (-Z) should be visible"
+        );
         // Chunk 10 m behind (+Z) -> culled.
-        assert!(!f.intersects_aabb([0.0, 0.0, 10.0], 2.0), "chunk behind (+Z) should be culled");
+        assert!(
+            !f.intersects_aabb([0.0, 0.0, 10.0], 2.0),
+            "chunk behind (+Z) should be culled"
+        );
         // Chunk far to the side (+X 50 m) -> culled.
-        assert!(!f.intersects_aabb([50.0, 0.0, -10.0], 2.0), "chunk far to the side should be culled");
+        assert!(
+            !f.intersects_aabb([50.0, 0.0, -10.0], 2.0),
+            "chunk far to the side should be culled"
+        );
+    }
+
+    #[test]
+    fn live_spawn_frustum_contains_at_least_one_world_chunk() {
+        // Exact current gpu_window spawn. This catches meter/voxel unit drift that can leave
+        // the live client with zero selected chunks and therefore a permanently white surface.
+        let cam = GpuCamera::new(
+            [6.0, crate::spawn_eye_y_m(28, 3), 6.0],
+            -std::f32::consts::FRAC_PI_2,
+            -0.4,
+            1280.0 / 800.0,
+        );
+        let f = Frustum::from_view_proj(&cam.view_proj());
+        let visible = (0..=25i64)
+            .flat_map(|cx| (0..=25i64).map(move |cz| (cx, cz)))
+            .filter(|&(cx, cz)| {
+                f.intersects_aabb([(cx as f32 + 0.5) * 4.0, 6.0, (cz as f32 + 0.5) * 4.0], 6.0)
+            })
+            .count();
+        assert!(visible > 0, "live spawn frustum selected zero world chunks");
+    }
+
+    #[test]
+    fn resize_recreates_matching_depth_attachment() {
+        futures::executor::block_on(async {
+            let mut scene = GpuScene::new_offscreen(64, 64).await.expect("gpu scene");
+            scene.resize(96, 80);
+            assert_eq!(scene.size(), (96, 80));
+            let chunk =
+                voxel_worldgen::generate_chunk(voxel_core::coords::ChunkCoord::new(0, 0, 0), 7);
+            let tris = crate::mesh_chunk_world_meters(&chunk);
+            let cam = GpuCamera::new(
+                [2.0, 4.0, 6.0],
+                -std::f32::consts::FRAC_PI_2,
+                -0.4,
+                96.0 / 80.0,
+            );
+            scene
+                .render_triangles(&tris, &cam)
+                .expect("render after resize");
+        });
     }
 }
 
