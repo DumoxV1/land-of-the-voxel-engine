@@ -2,6 +2,23 @@
 
 Hier wordt iedere verplichte terugstap en iedere materiële koerscorrectie vastgelegd.
 
+## 2026-07-15 — Worldgen: fBm-heightmap + biome-systeem (meer diepte/variatie)
+
+- User brainstormde over meerdere voxel-groottes (25/12,5/6,25/3,125 cm) voor meer diepte.
+  Onderzoek (deleg_8c81c16d + code-facts) toonde: één basisgrootte (12,5 cm) + betere gen +
+  texturing geeft meer variatie voor minder complexiteit dan een voxel-pyramide. Kleinere
+  voxels = 8×/64× data voor weinig zichtbare winst.
+- Geïmplementeerd onder strikte TDD:
+  - `height()` → multi-octaaf fBm (periodes 64/16/4/2, gewogen) i.p.v. 1-laags value-noise.
+    Test `terrain_has_fractal_relief` (eist multi-schaal relief; Rood→Groen).
+  - `biome_at()` → echte climate-noise (Meadow/Desert/Snow/Rock) i.p.v. stub. Test
+    `biomes_vary_across_regions` (eist >=2 biomes; Rood→Groen).
+  - `classify()` → biome-bewust oppervlak (grass/sand/snow/stone) + blote rots op steile
+    hellingen (slope via centrale verschillen). Nieuw materiaal SNOW(8) in worldgen + renderer.
+  - Renderer `MaterialPbr::defaults()` uitgebreid naar 0..=8 (snow-tint 0.93,0.95,0.98).
+- Geverifieerd: live capture spawn = 8366 kleuren (groen gras + grijze rotsen); Snow-regio =
+  lichtblauw-witte sneeuw. 36/36 tests groen. Determinisme + seamless chunk-grenzen behouden.
+
 ## 2026-07-15 — WASD-bewegingsbug gefixt (te snel + wit bij vliegen)
 
 - Twee oorzaken gevonden en onder TDD gefixt:

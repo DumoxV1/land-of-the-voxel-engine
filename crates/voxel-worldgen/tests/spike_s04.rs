@@ -82,7 +82,8 @@ fn non_empty_chunk() {
 
 #[test]
 fn material_layers_are_sane() {
-    // Topmost solid voxel in a column is grass(2); air(0) is above it; dirt/stone below.
+    // Topmost solid voxel in a column is a valid surface material (grass/sand/snow/stone);
+    // air(0) is above it; the column below is solid. Biome selects the exact surface mat.
     let chunk = generate_chunk(ChunkCoord::new(2, 0, 2), 42);
     for x in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
@@ -95,7 +96,11 @@ fn material_layers_are_sane() {
                 }
             }
             if let Some((ty, tm)) = top {
-                assert_eq!(tm, MaterialId::from(2), "top solid voxel must be grass(2) at x={x} z={z}");
+                let id = tm.as_u8();
+                assert!(
+                    matches!(id, 2 | 7 | 8 | 3),
+                    "top solid voxel must be a surface material (grass/sand/snow/stone), got {id} at x={x} z={z}"
+                );
                 // Directly above the top must be air.
                 if ty + 1 < CHUNK_SIZE {
                     assert_eq!(

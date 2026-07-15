@@ -84,6 +84,16 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       bij camera 200 m in negatieve ruimte = 7116 kleuren, NEAR_WHITE_PCT=0.1% (niet wit);
       normale spawn = 6575 kleuren, 0.002% wit. 36/36 test-binaires groen.
 
+27d. ✅ Worldgen fBm + biomes (2026-07-15): user-brainstorm over meerdere voxel-groottes →
+      onderzoek (deleg_8c81c16d) wees uit: één basis (12,5 cm) + betere gen + texturing wint.
+      `height()` = multi-octaaf fBm (64/16/4/2, gewogen), `biome_at()` = climate-noise
+      (Meadow/Desert/Snow/Rock), `classify()` biome-bewust + blote rots op steile helling.
+      Nieuw SNOW(8) materiaal in worldgen + renderer PBR. TDD: `biomes_vary_across_regions`
+      + `terrain_has_fractal_relief` (Rood→Groen); `material_layers_are_sane` aangepast naar
+      geldige oppervlaktematerialen. Geverifieerd: capture spawn 8366 kleuren (gras+rots),
+      Snow-regio lichtblauw-wit; 36/36 groen. Volgende: M4 P1 (BCn+mipmaps) of Fase-3
+      vertex-AO + schaduw + smooth voxels.
+
 ## Auditwaarschuwing
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
 

@@ -81,7 +81,8 @@ pub fn material_tint(mat: MaterialId) -> [f32; 3] {
         4 => [0.78, 0.80, 0.85], // metal (light steel)
         5 => [0.45, 0.30, 0.18], // wood (dark warm)
         6 => [0.30, 0.55, 0.25], // leaf (green)
-        7 => [0.85, 0.78, 0.55], // sand (warm)
+        7 => [0.85, 0.78, 0.55],   // sand (warm)
+        8 => [0.93, 0.95, 0.98],   // snow (near white, cool)
         _ => [0.6, 0.6, 0.65],   // fallback
     }
 }
@@ -100,7 +101,7 @@ impl MaterialPbr {
     /// Build the default palette from the warm `material_tint` set, with a tiling factor
     /// that gives triplanar projection visible variation on big greedy quads.
     pub fn defaults() -> Vec<MaterialPbr> {
-        (0..=7u8)
+        (0..=8u8)
             .map(|id| {
                 let t = material_tint(voxel_core::palette::MaterialId::from(id));
                 MaterialPbr {
