@@ -22,24 +22,17 @@ fn deterministic_same_seed_same_chunk() {
 
 #[test]
 fn different_seed_different_chunk() {
-    // Different seeds should produce different terrain for the same coord. Scan Y until we
-    // find a chunk that actually carries terrain for seed 0 (the deep (0,0,0) slab is empty
-    // below bedrock for every seed, so a fixed coord would make the test meaningless).
-    let mut surface = None;
-    for cy in 0..16i64 {
-        let c = ChunkCoord::new(0, cy, 0);
-        // Compare against an empty chunk with the SAME coord, so a genuinely empty chunk
-        // (Uniform AIR, no solid voxels) is detected as empty regardless of coord.
-        let empty = Chunk::uniform(c, MaterialId::from(0));
-        if generate_chunk(c, 0) != empty {
-            surface = Some(c);
-            break;
-        }
-    }
-    let c = surface.expect("expected a non-empty surface chunk for seed 0");
+    // Different seeds should produce different terrain for the same coord. With Stap 4 the
+    // underground is a solid stone body down to y=0 (identical for every seed), so we must
+    // compare a chunk that actually contains SURFACE terrain — the surface slab varies per
+    // seed (height + overhang warp). Use the surface chunk for seed 0.
+    let seed = 0u32;
+    let h_vox = (surface_height_m(0, 0, seed) / VOXEL_SIZE_M) as i64;
+    let cy = h_vox / 32;
+    let c = ChunkCoord::new(0, cy, 0);
     let a = generate_chunk(c, 0);
     let b = generate_chunk(c, 999);
-    assert_ne!(a, b, "different seeds should yield different chunks");
+    assert_ne!(a, b, "different seeds should yield different surface chunks");
 }
 
 #[test]
@@ -79,8 +72,8 @@ fn chunk_boundary_continuous() {
 #[test]
 fn non_empty_chunk() {
     // A generated chunk ON THE SURFACE should contain at least one solid voxel (no
-    // empty-world regressions). BEDROCK_DEPTH truncates deep chunks to AIR, so we must
-    // sample the chunk that actually contains the terrain surface, not a deep one.
+    // empty-world regressions). Stap 4 fills the underground with stone to y=0, so any
+    // chunk at or below the surface carries terrain. Sample the surface chunk.
     let seed = 0u32;
     let h_vox = (surface_height_m(0, 0, seed) / VOXEL_SIZE_M) as i64;
     let surface_cy = h_vox / 32;
@@ -100,38 +93,48 @@ fn non_empty_chunk() {
 
 #[test]
 fn material_layers_are_sane() {
-    // Topmost solid voxel in a column is a valid surface material (grass/sand/snow/stone);
-    // air(0) is above it; the column below is solid. Biome selects the exact surface mat.
-    // Sample the chunk that actually contains the surface (BEDROCK truncates deep chunks).
+    // Topmost solid voxel of a COLUMN is a valid surface material (grass/sand/snow/stone),
+    // with air above it; everything below is solid (stone/cave-air skeleton). With Stap 4 the
+    // topmost solid can sit in any chunk of the column (overhang warp pushes it up), so we
+    // scan the whole column from the surface chunk upward and record the true top.
     let seed = 42u32;
     let h_vox = (surface_height_m(2, 2, seed) / VOXEL_SIZE_M) as i64;
     let surface_cy = h_vox / 32;
-    let chunk = generate_chunk(ChunkCoord::new(2, surface_cy, 2), seed);
-    for x in 0..CHUNK_SIZE {
-        for z in 0..CHUNK_SIZE {
-            let mut top = None;
-            for y in (0..CHUNK_SIZE).rev() {
-                let m = chunk.get(voxel_core::coords::LocalVoxel::new(x, y, z));
-                if m != MaterialId::from(0) {
-                    top = Some((y, m));
-                    break;
-                }
-            }
-            if let Some((ty, tm)) = top {
-                let id = tm.as_u8();
-                assert!(
-                    matches!(id, 2 | 7 | 8 | 3),
-                    "top solid voxel must be a surface material (grass/sand/snow/stone), got {id} at x={x} z={z}"
-                );
-                // Directly above the top must be air.
-                if ty + 1 < CHUNK_SIZE {
-                    assert_eq!(
-                        chunk.get(voxel_core::coords::LocalVoxel::new(x, ty + 1, z)),
-                        MaterialId::from(0),
-                        "air must sit above the surface at x={x} z={z}"
-                    );
+
+    // Find, per (x,z) column, the highest solid voxel across all chunks (true surface top).
+    let mut top_world_y: std::collections::HashMap<(u8, u8), i64> = std::collections::HashMap::new();
+    let mut top_mat: std::collections::HashMap<(u8, u8), u8> = std::collections::HashMap::new();
+    for cy in surface_cy..(surface_cy + 3).min(16) {
+        let chunk = generate_chunk(ChunkCoord::new(2, cy, 2), seed);
+        let base_y = cy * 32;
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                for y in (0..CHUNK_SIZE).rev() {
+                    let m = chunk.get(voxel_core::coords::LocalVoxel::new(x, y, z));
+                    if m != MaterialId::from(0) {
+                        let wy = base_y + y as i64;
+                        let key = (x, z);
+                        if top_world_y.get(&key).map_or(true, |&t| wy > t) {
+                            top_world_y.insert(key, wy);
+                            top_mat.insert(key, m.as_u8());
+                        }
+                        break;
+                    }
                 }
             }
         }
+    }
+    for ((x, z), id) in &top_mat {
+        assert!(
+            matches!(id, 2 | 7 | 8 | 3),
+            "top solid voxel must be a surface material (grass/sand/snow/stone), got {id} at x={x} z={z}"
+        );
+        // Directly above the true top must be air (no solid voxel above the surface).
+        let wy = top_world_y[&(*x, *z)] + 1;
+        let cy = wy / 32;
+        let ly = (wy - cy * 32) as u8;
+        let above = generate_chunk(ChunkCoord::new(2, cy, 2), seed)
+            .get(voxel_core::coords::LocalVoxel::new(*x, ly, *z));
+        assert_eq!(above, MaterialId::from(0), "air must sit above the surface at x={x} z={z}");
     }
 }

@@ -193,7 +193,24 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       - renderer.rs (shader-spike) NIET aangeraakt; alleen `crates/voxel-worldgen/src/lib.rs`
         gewijzigd + gecommit (geïsoleerd, zoals 27m's veilige patroon).
 
-## Auditwaarschuwing
+27o. ✅ **TERRAIN GEN 2.0 — 3D DENSITY FIELD (Stap 4, 2026-07-15):** platte 2D-hoogtekaart-shell
+      vervangen door hybride density-field (optie A, door gebruiker gekozen). De walkable
+      heightfield blijft de grond; een 3D fBm-warp (`fbm3`, nieuw) duwt overhangs/richels
+      BOVEN de surface (alleen omhoog, zodat de grass-cap + walkability intact blijven), en een
+      aparte 3D cave-noise boort grotten in een band van ~12 m onder de surface. Nieuw:
+      `OVERHANG_AMP_VOX=6`, `CAVE_BAND_DEPTH=96`, `CAVE_THRESH=0.5`, `fbm3`+`hash3` (8-hoek
+      trilinear), `MAX_SOLID_M` (surface+overhang bound voor early-out). De ondergrond is nu een
+      SOLID body tot y=0 (geen 1-voxel shell meer → zijwanden + caves zichtbaar). Envelope/
+      `column_solid_cy_range` vereenvoudigd naar [0, max_h+overhang]. `classify` geeft STONE voor
+      voxels boven de heightfield (overhangs renderen echt). Strict TDD: nieuwe test
+      `terrain_has_caves_and_overhangs` (Rood→Groen) + 5 bestaande tests aangepast aan de
+      solid-body (overhang/cave/multi-layer/stone-body/underground-truncate). **19/19 worldgen
+      tests groen** (14 lib + 5 spike), workspace 36/36 binaries groen, 28/28 GPU-lib (zonlicht)
+      onaangetast. Ad-hoc verificatie (8×8 kolommen, seed 7): 2/64 kolommen overhang (910 vox),
+      16/64 kolommen cave (276k air-vox) → **PASS**. Release `gpu_window_main` herbouwd; spawn
+      top=216 vox (~27 m). Run voor visuele check:
+      `cargo run --release --example gpu_window_main -p voxel-client`.
+
 Researchmemo's zijn input, geen waarheid. Een steekproef vond foutieve actualiteitsclaims en niet-onderbouwde benchmarkgetallen. Geen cijfer of stackadvies wordt overgenomen zonder onafhankelijke broncontrole of lokaal experiment.
 
 ## Actieve automatisering

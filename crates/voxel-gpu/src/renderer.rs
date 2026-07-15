@@ -27,6 +27,7 @@ pub struct GpuVertex {
     pub normal: [f32; 3],
     pub material: u32,
     pub ao: [f32; 3],
+    pub sun: [f32; 3],
 }
 
 /// Camera uniforms (view-projection + params) for the shader.
@@ -265,6 +266,11 @@ impl GpuScene {
                     format: wgpu::VertexFormat::Float32x3,
                     offset: 28,
                     shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 40,
+                    shader_location: 4,
                 },
             ],
         };
@@ -540,6 +546,7 @@ impl GpuScene {
                     normal: [t.normal.x, t.normal.y, t.normal.z],
                     material: t.material.0 as u32,
                     ao: t.ao,
+                    sun: t.sun,
                 });
             }
         }
@@ -958,7 +965,7 @@ mod tests {
                     / 32;
                 voxel_worldgen::generate_chunk(voxel_core::coords::ChunkCoord::new(cx, cy, cz), 7)
             };
-            let tris = crate::mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false);
+            let tris = crate::mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false, &[], 1024);
             let cam = GpuCamera::new(
                 [2.0, 4.0, 6.0],
                 -std::f32::consts::FRAC_PI_2,
@@ -990,6 +997,7 @@ mod tests {
                     normal: voxel_mesher::Vec3::new(0.0, 1.0, 0.0),
                     material: voxel_core::palette::MaterialId::from(2u8),
                     ao: [1.0; 3],
+                    sun: [1.0; 3],
                 },
                 voxel_mesher::Triangle {
                     a: voxel_mesher::Vec3::new(0.0, 0.0, 0.0),
@@ -998,6 +1006,7 @@ mod tests {
                     normal: voxel_mesher::Vec3::new(0.0, 1.0, 0.0),
                     material: voxel_core::palette::MaterialId::from(2u8),
                     ao: [1.0; 3],
+                    sun: [1.0; 3],
                 },
             ];
             // Camera at the proven live-client angle (yaw=-pi/2 looks down -Z), placed
@@ -1057,6 +1066,7 @@ struct VtxIn {
     @location(1) normal: vec3<f32>,
     @location(2) @interpolate(flat) material: u32,
     @location(3) @interpolate(flat) ao: vec3<f32>,
+    @location(4) @interpolate(flat) sun: vec3<f32>,
 };
 struct VtxOut {
     @builtin(position) clip: vec4<f32>,
@@ -1064,6 +1074,7 @@ struct VtxOut {
     @location(1) @interpolate(flat) material: u32,
     @location(2) world_pos: vec3<f32>,
     @location(3) @interpolate(flat) ao: vec3<f32>,
+    @location(4) @interpolate(flat) sun: vec3<f32>,
 };
 
 @vertex
@@ -1074,6 +1085,7 @@ fn vs_main(in: VtxIn) -> VtxOut {
     o.material = in.material;
     o.world_pos = in.pos;
     o.ao = in.ao;
+    o.sun = in.sun;
     return o;
 }
 
@@ -1155,7 +1167,15 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     let ao_corner = (in.ao.x + in.ao.y + in.ao.z) / 3.0;
     let ao = ao_corner * (0.9 + 0.2 * h);   // AO modulated by subtle jitter
 
-    var col = albedo * (hemi * (ambient + 0.55) + vec3<f32>(1.0, 0.96, 0.88) * 0.35 * diff) * ao;
+    // Stap 3 (BFS zonlicht-lighting): `in.sun` is the baked per-voxel sky-light in [0,1]
+    // (1 = open sky, 0 = deep cave / under a roof). It replaces the old uniform "open sky"
+    // assumption so caves and overhangs go dark while exposed terrain stays bright. The
+    // hemi term below already models sky-vs-ground bounce; `sun` scales that bounce so a
+    // shadowed voxel receives only the dim ambient floor (no sky contribution).
+    let sun_corner = (in.sun.x + in.sun.y + in.sun.z) / 3.0;
+    let sun = clamp(sun_corner, 0.0, 1.0);
+
+    var col = albedo * (hemi * (ambient + 0.55) * sun + vec3<f32>(1.0, 0.96, 0.88) * 0.35 * diff) * ao;
     col += m.emissive.rgb * day;
 
     let dist = length(in.world_pos - cam.eye_pos.xyz);

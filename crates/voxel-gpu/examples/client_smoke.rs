@@ -70,7 +70,7 @@ fn main() {
                         let coord = ChunkCoord::new(cx, cy, cz);
                         let entry = cache.entry(coord).or_insert_with(|| {
                             let c = voxel_worldgen::generate_chunk(coord, SEED);
-                            mesh_chunk_world_meters(&c, voxel_gpu::chunk_stream::Lod::Full, false)
+                            mesh_chunk_world_meters(&c, voxel_gpu::chunk_stream::Lod::Full, false, &[], 1024)
                         });
                         tris.extend_from_slice(entry);
                     }

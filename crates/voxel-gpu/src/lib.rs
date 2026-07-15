@@ -7,6 +7,7 @@ pub mod probe;
 pub mod renderer;
 pub mod cache;
 pub mod chunk_stream;
+pub mod sunlight;
 
 /// Mijlpaal 3 (P3): non-blocking chunk meshing.
 ///
@@ -89,8 +90,8 @@ pub fn mesh_chunk_imposter(chunk: &Chunk) -> Vec<Triangle> {
     let b = Vec3::new(x1, y, z0);
     let c = Vec3::new(x1, y, z1);
     let d = Vec3::new(x0, y, z1);
-    let t1 = Triangle { a, b, c, normal: up, material: mat, ao };
-    let t2 = Triangle { a, b: c, c: d, normal: up, material: mat, ao };
+    let t1 = Triangle { a, b, c, normal: up, material: mat, ao, sun: [1.0; 3] };
+    let t2 = Triangle { a, b: c, c: d, normal: up, material: mat, ao, sun: [1.0; 3] };
     vec![t1, t2]
 }
 
@@ -105,14 +106,16 @@ pub fn mesh_chunk_world_meters(
     chunk: &Chunk,
     lod: crate::chunk_stream::Lod,
     with_skirts: bool,
+    neighbours: &[Chunk],
+    y_max: i64,
 ) -> Vec<Triangle> {
-    match lod {
-        crate::chunk_stream::Lod::Imposter => {
-            // Imposter: cheap flat quad, no greedy sweep at all.
-            return mesh_chunk_imposter(chunk);
-        }
-        _ => {}
+    // Imposter: cheap flat quad, no greedy sweep at all. Sunlight is irrelevant for the
+    // far-ring billboard (it shades like flat ground); leave sun at the default full value
+    // the imposter constructor sets.
+    if let crate::chunk_stream::Lod::Imposter = lod {
+        return mesh_chunk_imposter(chunk);
     }
+    let mut tris: Vec<Triangle> = Vec::new();
     // LOD: downsample to 2x blocks first, then mesh the coarse chunk at 2x world scale.
     let (mesh_chunk, voxel_scale) = match lod {
         crate::chunk_stream::Lod::Full => (chunk.clone(), VOXEL_SIZE_M),
@@ -149,6 +152,13 @@ pub fn mesh_chunk_world_meters(
             ..t
         })
         .collect();
+
+    // Stap 3 (BFS zonlicht-lighting): bake sky-light into the mesh so caves/overhangs render
+    // dark and open terrain renders bright. MUST run AFTER `to_world` (above) so the triangle
+    // positions are in world meters — `bake_sunlight` reads them as world meters and maps back
+    // to voxels via the chunk origin. Running it before the offset (on raw 0..32 voxel coords)
+    // made every non-origin chunk read the wrong voxel and render as a flat dark rectangle.
+    crate::sunlight::bake_sunlight(chunk, &mut tris, neighbours, y_max, voxel_scale, origin);
 
     if with_skirts {
         // Crack-free LOD seams: hang a skirt from the chunk's *actual surface* downward so
@@ -190,14 +200,15 @@ pub fn mesh_chunk_world_meters(
             let h = Vec3::new(x0, bot_y, z1);
             let n = Vec3::new(0.0, -1.0, 0.0);
             let ao = [1.0f32; 3];
-            tris.push(Triangle { a: e, b: f, c: b, normal: n, material: mat, ao });
-            tris.push(Triangle { a: e, b: b, c: a, normal: n, material: mat, ao });
-            tris.push(Triangle { a: f, b: g, c: c, normal: n, material: mat, ao });
-            tris.push(Triangle { a: f, b: c, c: b, normal: n, material: mat, ao });
-            tris.push(Triangle { a: g, b: h, c: d, normal: n, material: mat, ao });
-            tris.push(Triangle { a: g, b: d, c: c, normal: n, material: mat, ao });
-            tris.push(Triangle { a: h, b: e, c: a, normal: n, material: mat, ao });
-            tris.push(Triangle { a: h, b: a, c: d, normal: n, material: mat, ao });
+            let sun = [1.0f32; 3];
+            tris.push(Triangle { a: e, b: f, c: b, normal: n, material: mat, ao, sun });
+            tris.push(Triangle { a: e, b: b, c: a, normal: n, material: mat, ao, sun });
+            tris.push(Triangle { a: f, b: g, c: c, normal: n, material: mat, ao, sun });
+            tris.push(Triangle { a: f, b: c, c: b, normal: n, material: mat, ao, sun });
+            tris.push(Triangle { a: g, b: h, c: d, normal: n, material: mat, ao, sun });
+            tris.push(Triangle { a: g, b: d, c: c, normal: n, material: mat, ao, sun });
+            tris.push(Triangle { a: h, b: e, c: a, normal: n, material: mat, ao, sun });
+            tris.push(Triangle { a: h, b: a, c: d, normal: n, material: mat, ao, sun });
         };
         // Skirt along the four chunk edges (full footprint perimeter).
         push_quad(ox, ox + s, oz, oz + s);
@@ -304,7 +315,22 @@ pub fn run_mesh_job(
         chunk: chunk.clone(),
     });
     // Phase 2: mesh-later. The (more expensive) greedy mesh follows.
-    let tris = mesh_chunk_world_meters(&chunk, job.lod, false);
+    // Stap 3: also generate the 6 direct neighbour chunks (4 horizontal + chunk above/below)
+    // so sunlight can flow across chunk boundaries, and a generous y_max covering the full
+    // world height (terrain can reach ~119 m; 1024 vox ≈ 128 m is safe headroom).
+    let y_max = 1024; // world-voxel ceiling for sunlight seeding (covers all real terrain)
+    let neighbours: Vec<Chunk> = [
+        (job.coord.x + 1, job.coord.y, job.coord.z),
+        (job.coord.x - 1, job.coord.y, job.coord.z),
+        (job.coord.x, job.coord.y, job.coord.z + 1),
+        (job.coord.x, job.coord.y, job.coord.z - 1),
+        (job.coord.x, job.coord.y + 1, job.coord.z),
+        (job.coord.x, job.coord.y - 1, job.coord.z),
+    ]
+    .iter()
+    .map(|&(x, y, z)| voxel_worldgen::generate_chunk(ChunkCoord::new(x, y, z), seed))
+    .collect();
+    let tris = mesh_chunk_world_meters(&chunk, job.lod, false, &neighbours, y_max);
     let _ = tx.send(WorkerMsg::Mesh {
         coord: job.coord,
         tris,
@@ -334,7 +360,7 @@ mod tests {
         let cy = (col_top_vox / CHUNK_SIZE as i64).clamp(0, 12);
         let coord = ChunkCoord::new(cx, cy, cz);
         let chunk = voxel_worldgen::generate_chunk(coord, seed);
-        let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false);
+        let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false, &[], 1024);
         assert!(
             !tris.is_empty(),
             "spawn surface chunk ({cx},{cy},{cz}) must produce triangles for frame-1 render"
@@ -484,8 +510,8 @@ mod tests {
         let coord = ChunkCoord::new(5, 0, 5);
         let mut full_chunk = Chunk::uniform(coord, MaterialId::from(0u8));
         full_chunk.set(LocalVoxel::new(0, 0, 0), MaterialId::from(2u8));
-        let full = mesh_chunk_world_meters(&full_chunk, crate::chunk_stream::Lod::Full, false);
-        let half = mesh_chunk_world_meters(&full_chunk, crate::chunk_stream::Lod::Half, false);
+        let full = mesh_chunk_world_meters(&full_chunk, crate::chunk_stream::Lod::Full, false, &[], 1024);
+        let half = mesh_chunk_world_meters(&full_chunk, crate::chunk_stream::Lod::Half, false, &[], 1024);
         assert_eq!(full.len(), 10, "full-res floor voxel = 10 tris (bottom culled on bedrock)");
         assert_eq!(half.len(), 10, "half-res floor block = 10 tris (bottom culled on bedrock)");
         let min_x = |m: &[Triangle]| m.iter().flat_map(|t| [t.a, t.b, t.c]).map(|v| v.x).fold(f32::MAX, f32::min);
@@ -585,7 +611,7 @@ mod tests {
                 / 32;
             let coord = ChunkCoord::new(cx, cy, cz);
             let chunk = voxel_worldgen::generate_chunk(coord, 7);
-            let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false);
+            let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false, &[], 1024);
             assert!(
                 !tris.is_empty(),
                 "negative chunk {cx},{cz} must produce terrain, not be skipped"
@@ -658,8 +684,8 @@ mod tests {
             }
         }
 
-        let no_skirt = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false);
-        let with_skirt = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, true);
+        let no_skirt = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false, &[], 1024);
+        let with_skirt = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, true, &[], 1024);
 
         // Skirts must add geometry.
         assert!(
@@ -684,6 +710,38 @@ mod tests {
         assert!(
             has_below,
             "skirt band must hang below surface top ({surface_top}); no downward vertices found"
+        );
+    }
+
+    #[test]
+    fn off_origin_chunk_bakes_sun_correctly() {
+        // Regression guard (2026-07-15): bake_sunlight MUST run on world-meter triangle
+        // positions (after the `to_world` offset), not raw 0..32 voxel coords. On a chunk
+        // whose coord != (0,0,0) a wrong offset reads the wrong voxel and paints the whole
+        // surface as a flat dark rectangle in-game. Here we prove an off-origin surface
+        // chunk still bakes full sky light on its top faces.
+        use voxel_core::coords::{CHUNK_SIZE, VOXEL_SIZE_M, LocalVoxel};
+        use voxel_core::palette::MaterialId;
+        let coord = ChunkCoord::new(2, 0, 3); // off-origin: x=8..12 m, z=12..16 m
+        let mut chunk = Chunk::uniform(coord, MaterialId::from(0u8));
+        for y in 0..8u8 {
+            for z in 0..CHUNK_SIZE as u8 {
+                for x in 0..CHUNK_SIZE as u8 {
+                    chunk.set(LocalVoxel::new(x, y, z), MaterialId::from(2u8));
+                }
+            }
+        }
+        let above = Chunk::uniform(ChunkCoord::new(2, 1, 3), MaterialId::from(0u8));
+        let tris = mesh_chunk_world_meters(&chunk, crate::chunk_stream::Lod::Full, false, &[above], 1024);
+        let max_sun = tris
+            .iter()
+            .filter(|t| t.normal.y > 0.5)
+            .flat_map(|t| t.sun.iter().copied())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_sun > 0.9,
+            "off-origin chunk ({},{},{}) top must bake full sky (got {max_sun:.3}), not a dark rectangle",
+            coord.x, coord.y, coord.z
         );
     }
 }

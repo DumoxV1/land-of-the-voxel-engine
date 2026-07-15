@@ -30,6 +30,10 @@ impl Vec3 {
 /// A single triangle: three vertices sharing a normal and material id. `ao` holds the
 /// per-corner (a, b, c) vertex ambient occlusion in [0,1] (1.0 = fully lit / open sky,
 /// lower = crevice). Baked at mesh time (F5 vertex-AO, 0 runtime cost).
+///
+/// `sun` is the per-corner combined sun+hemisphere light in [0,1] (1.0 = full sky light,
+/// lower = in shadow / deep inside a cave). Baked at mesh time by the BFS sunlight
+/// propagation pass (Stap 3, 2026-07-15) — 0 runtime cost on the GPU.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Triangle {
     pub a: Vec3,
@@ -38,6 +42,7 @@ pub struct Triangle {
     pub normal: Vec3,
     pub material: MaterialId,
     pub ao: [f32; 3],
+    pub sun: [f32; 3],
 }
 
 /// View over a chunk's solidity and material, treating out-of-bounds as empty (air).
@@ -168,20 +173,20 @@ fn emit_quad(
     let ao_p3 = corner_ao(view, vx, vy, vz, normal, u, v, 0, 1);
     if gx * normal.x + gy * normal.y + gz * normal.z >= 0.0 {
         out.push((
-            Triangle { a: p0, b: p1, c: p2, normal, material, ao: [ao_p0, ao_p1, ao_p2] },
+            Triangle { a: p0, b: p1, c: p2, normal, material, ao: [ao_p0, ao_p1, ao_p2], sun: [1.0; 3] },
             material,
         ));
         out.push((
-            Triangle { a: p0, b: p2, c: p3, normal, material, ao: [ao_p0, ao_p2, ao_p3] },
+            Triangle { a: p0, b: p2, c: p3, normal, material, ao: [ao_p0, ao_p2, ao_p3], sun: [1.0; 3] },
             material,
         ));
     } else {
         out.push((
-            Triangle { a: p0, b: p2, c: p1, normal, material, ao: [ao_p0, ao_p2, ao_p1] },
+            Triangle { a: p0, b: p2, c: p1, normal, material, ao: [ao_p0, ao_p2, ao_p1], sun: [1.0; 3] },
             material,
         ));
         out.push((
-            Triangle { a: p0, b: p3, c: p2, normal, material, ao: [ao_p0, ao_p3, ao_p2] },
+            Triangle { a: p0, b: p3, c: p2, normal, material, ao: [ao_p0, ao_p3, ao_p2], sun: [1.0; 3] },
             material,
         ));
     }

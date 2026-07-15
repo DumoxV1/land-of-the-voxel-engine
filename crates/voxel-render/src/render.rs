@@ -59,6 +59,7 @@ pub fn render_world(chunks: &[(ChunkCoord, Chunk)], cam: &Camera, w: u32, h: u32
                 normal: t.normal,
                 material: t.material,
                 ao: t.ao,
+                sun: [1.0; 3],
             });
         }
     }

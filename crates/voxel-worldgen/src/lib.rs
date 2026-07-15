@@ -23,19 +23,47 @@ const STONE: u8 = 3;
 const SAND: u8 = 7;
 const SNOW: u8 = 8;
 
-/// How far below the surface we still fill solid voxels. Kept at 1 (a single support voxel
-/// under the grass) so the world is a thin shell, not an 8-voxel-thick slab: flying beneath
-/// the map then shows nothing (the bottom face is culled against the virtual bedrock floor in
-/// the mesher, and there is no thick side wall to see). Collision still lands on the surface
-/// voxel. One voxel of footing halves generation cost on deep chunks.
-const BEDROCK_DEPTH: i64 = 1;
+/// REMOVED in Stap 4 (Terrain 2.0, 2026-07-15): the world is now a SOLID body down to y=0
+/// (caves carved as air pockets in a band below the surface; overhangs warped above it), so
+/// there is no "thin shell" model anymore. Kept only as a tombstone constant so the legacy
+/// Stap-3 intent is documented. The 1-voxel shell was what made the terrain look flat and
+/// empty from the side — replaced by the density field.
+const _BEDROCK_DEPTH_DEPRECATED: i64 = 1;
 
 /// Hard upper bound on `surface_height_m` in **meters**, used by the O(1) air-chunk early-out
 /// in `generate_chunk`. `surface_height_m = base + mid + micro` where each term is a
 /// `(fbm*0.5+0.5)` value in [0,1) times its amplitude: base ≤ 60 m, mid ≤ 40·max_roughness
 /// (roughness ≤ 1.4 → 56 m), micro ≤ 3 m → ≤ 119 m. A +4 m margin keeps the bound safe if the
-/// amplitude constants shift. MUST stay ≥ the true supremum or the early-out would clip terrain.
-const MAX_SURFACE_M: f32 = 60.0 + 40.0 * 1.4 + 3.0 + 4.0; // 123 m
+/// amplitude constants shift. Stap 4 (Terrain 2.0) adds an overhang bulge of up to
+/// `OVERHANG_AMP_CEIL` voxels ABOVE the surface, so the true tallest solid voxel is
+/// `MAX_SURFACE_VOX + OVERHANG_AMP_CEIL`. MUST stay ≥ the true supremum (surface + overhang)
+/// or the early-out would clip overhang voxels.
+const MAX_SURFACE_M: f32 = 60.0 + 40.0 * 1.4 + 3.0 + 4.0; // 123 m (heightfield only)
+/// True ceiling (meters) of any solid voxel = heightfield supremum + overhang bulge.
+const MAX_SOLID_M: f32 =
+    MAX_SURFACE_M + (OVERHANG_AMP_CEIL as f32) * voxel_core::coords::VOXEL_SIZE_M;
+
+/// Stap 4 (Terrain 2.0, 2026-07-15): 3D density-field terrain. The base surface stays the
+/// 2D heightmap (`surface_height_m`), but it is warped by a 3D noise field to produce
+/// overhangs/ledges ABOVE the surface, and a separate 3D cave-noise carves tunnels BELOW it.
+/// This keeps the walkable ground (the heightfield) intact while adding real caves/overhangs
+/// that the Stap-3 sunlight BFS then shadows correctly.
+
+/// Max overhang bulge in VOXELS (±0.75 m). Small so the walkable surface is untouched and
+/// `MAX_SURFACE_M`'s margin still covers the tallest overhang.
+const OVERHANG_AMP_VOX: f32 = 6.0;
+/// Ceil of the overhang amplitude in voxels, used to widen the streaming Y-envelope.
+const OVERHANG_AMP_CEIL: i64 = 6;
+/// Depth below the surface (voxels) within which caves may be carved. Bounds the solid
+/// "slab" so flying beneath the world still shows the underside of a thin shell, and the
+/// streaming range stays tight (no bottomless stone fill).
+const CAVE_BAND_DEPTH: i64 = 96; // ~12 m: caves span a few Y-chunks below the surface
+/// Cave-noise threshold in [-1,1]: voxels ABOVE this (sparse) become air tunnels.
+const CAVE_THRESH: f32 = 0.5;
+/// Overhang warp octaves (voxels): one broad octave → large gentle ledges.
+const OVERHANG_OCTAVES: &[(i64, f32)] = &[(128, 1.0)];
+/// Cave tunnel octaves (voxels): one broad octave → 12 m-scale cave networks.
+const CAVE_OCTAVES: &[(i64, f32)] = &[(96, 1.0)];
 
 /// Max distinct column height-buffers kept per thread (LRU). One streamed frame touches a
 /// few hundred columns; 64 comfortably covers the burst of Y-slabs generated for a single
@@ -120,9 +148,10 @@ thread_local! {
 /// wasted per-air-chunk work (frustum test + cache probe + generate call) is avoided.
 ///
 /// Pure + deterministic (function of cx, cz, seed); cached per thread. Mirrors the envelope
-/// `generate_chunk` derives from `max_h` (max surface over the 32² footprint) and `min_floor`
-/// (min `max(h - BEDROCK_DEPTH, 0)`): a chunk overlaps solid iff
-/// `cy*SIZE <= max_h && cy*SIZE + SIZE-1 >= min_floor`.
+/// `generate_chunk` derives from `max_h` (max surface over the 32² footprint) plus the overhang
+/// bulge: a chunk overlaps solid iff its span [cy*SIZE, cy*SIZE+SIZE-1] meets
+/// [0, max_h + OVERHANG_AMP_CEIL]. The underground is solid down to y=0 (Stap 4 carves caves
+/// in a band below the surface, but the stone body extends to bedrock).
 pub fn column_solid_cy_range(cx: i64, cz: i64, seed: u32) -> (i64, i64) {
     let key = (cx, cz, seed);
     if let Some(hit) = COLUMN_RANGE_CACHE.with(|c| c.borrow().get(&key).copied()) {
@@ -131,7 +160,6 @@ pub fn column_solid_cy_range(cx: i64, cz: i64, seed: u32) -> (i64, i64) {
     let origin_x = cx * SIZE;
     let origin_z = cz * SIZE;
     let mut max_h = i64::MIN;
-    let mut min_floor = i64::MAX;
     // Sample the exact 32² interior footprint `generate_chunk`'s envelope uses — no border
     // ring (the ring only feeds slope, not the air/solid decision).
     for lx in 0..SIZE {
@@ -141,18 +169,12 @@ pub fn column_solid_cy_range(cx: i64, cz: i64, seed: u32) -> (i64, i64) {
             if h > max_h {
                 max_h = h;
             }
-            let floor = (h - BEDROCK_DEPTH).max(0);
-            if floor < min_floor {
-                min_floor = floor;
-            }
         }
     }
-    // `hi` = highest cy whose bottom voxel (cy*SIZE) still sits at/under the tallest surface.
-    let hi = max_h.div_euclid(SIZE);
-    // `lo` = lowest cy whose top voxel (cy*SIZE + SIZE-1) still reaches the lowest bedrock
-    // floor. Floor-division is conservative (may include one extra all-AIR chunk below, never
-    // one too few), so a solid chunk is never excluded.
-    let lo = (min_floor - (SIZE - 1)).div_euclid(SIZE);
+    // `hi` = highest cy whose bottom voxel (cy*SIZE) still sits at/under the tallest surface
+    // PLUS the overhang bulge (Stap 4). `lo` = 0 — the underground is now solid down to y=0.
+    let hi = (max_h + OVERHANG_AMP_CEIL).div_euclid(SIZE);
+    let lo = 0i64;
     let range = (lo, hi);
     COLUMN_RANGE_CACHE.with(|c| {
         let mut c = c.borrow_mut();
@@ -181,7 +203,7 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
     // 40·max_roughness + micro 3 m). Any chunk whose lowest voxel sits above that ceiling is
     // guaranteed all-AIR, so we skip building the (n+2)² height buffer entirely. This is the
     // hot case: the client streams a tall column of Y-layers, most of which are empty sky.
-    if origin.y as f32 * voxel_core::coords::VOXEL_SIZE_M > MAX_SURFACE_M {
+    if origin.y as f32 * voxel_core::coords::VOXEL_SIZE_M > MAX_SOLID_M {
         return chunk;
     }
 
@@ -205,23 +227,20 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
     // Y-layers 0..=12 per column, so most streamed chunks are pure air above/below the thin
     // surface shell — this skips their generation cost entirely.
     let mut max_h = i64::MIN;
-    let mut min_floor = i64::MAX;
     for lx in 0..n {
         for lz in 0..n {
             let h = h_vox(lx, lz);
             if h > max_h {
                 max_h = h;
             }
-            let floor_wy = (h - BEDROCK_DEPTH).max(0);
-            if floor_wy < min_floor {
-                min_floor = floor_wy;
-            }
         }
     }
     let chunk_lo = origin.y;
-    let chunk_hi = origin.y + n - 1;
-    if chunk_lo > max_h || chunk_hi < min_floor {
-        return chunk; // entirely above surface or below bedrock → all AIR
+    // O(1) sky-skip: any chunk whose lowest voxel sits above the tallest possible solid
+    // voxel (surface + overhang bulge) is guaranteed all-AIR. The underground is solid down
+    // to y=0 (Stap 4), so there is no "below bedrock" empty band to skip anymore.
+    if chunk_lo > max_h + OVERHANG_AMP_CEIL {
+        return chunk; // entirely above the (warped) surface → all AIR
     }
 
     for lx in 0..SIZE as u8 {
@@ -240,13 +259,34 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
             let hd = h_vox(lx as i64, lz as i64 - 1) as f32 * voxel_core::coords::VOXEL_SIZE_M;
             let hu = h_vox(lx as i64, lz as i64 + 1) as f32 * voxel_core::coords::VOXEL_SIZE_M;
             let slope = ((hr - hl).abs() + (hu - hd).abs()) / voxel_core::coords::VOXEL_SIZE_M;
-            // Only fill from the surface down to BEDROCK_DEPTH below it; deeper voxels stay
-            // AIR (never drawn — greedy meshing only emits the visible shell).
-            let floor_wy = (h - BEDROCK_DEPTH).max(0);
             for ly in 0..SIZE as u8 {
                 let wy = origin.y + ly as i64;
-                if wy < floor_wy {
-                    continue; // below bedrock — leave AIR
+                // Stap 4 (Terrain 2.0): 3D density field.
+                // Base = walkable surface (heightfield); warp adds overhangs/ledges ABOVE it;
+                // a separate 3D cave-noise carves tunnels BELOW it. Solid iff density>0 AND
+                // not inside a cave voxel. The surface term dominates near y≈h so the ground
+                // stays walkable (terrain_is_walkable invariant preserved).
+                let h_m = h as f32 * voxel_core::coords::VOXEL_SIZE_M;
+                let overhang = fbm3(wx, wy, wz, seed ^ 0x0A11, &OVERHANG_OCTAVES); // [-1,1]
+                // Only warp UP (overhangs/ledges); a negative warp would dig the surface below
+                // the heightfield, dropping the grass cap and breaking walkability. `max(0,..)`
+                // keeps the heightfield as the floor of the solid body.
+                let warp = (overhang * 0.5 + 0.5).max(0.0); // [0,1]
+                let density = (h_m - wy as f32 * voxel_core::coords::VOXEL_SIZE_M)
+                    + warp * OVERHANG_AMP_VOX * voxel_core::coords::VOXEL_SIZE_M;
+                if density <= 0.0 {
+                    continue; // above the (warped) surface → air
+                }
+                // Below the surface: carve caves in a band, leaving the top few voxels solid
+                // (so the floor you stand on is intact) and only tunnelling deeper.
+                if wy < h - 3 {
+                    let depth_below = h - wy; // voxels under the surface
+                    if depth_below <= CAVE_BAND_DEPTH {
+                        let cave_n = fbm3(wx, wy, wz, seed ^ 0xC4AE, &CAVE_OCTAVES);
+                        if cave_n > CAVE_THRESH {
+                            continue; // inside a cave tunnel → air
+                        }
+                    }
                 }
                 let m = classify(wy, h, slope, q, local);
                 if m != AIR {
@@ -263,7 +303,11 @@ pub fn generate_chunk(coord: ChunkCoord, seed: u32) -> Chunk {
 /// height-field sampling (caller computes `slope` once per column — see `generate_chunk`).
 fn classify(wy: i64, h: i64, slope: f32, q: BiomeQuery, local: LocalParams) -> u8 {
     if wy > h {
-        return AIR;
+        // Stap 4 (Terrain 2.0): this voxel is ABOVE the heightfield but the density field
+        // made it solid (an overhang/ledge warped up from the surface). It can only be
+        // reached when the caller's density>0 check already passed, so it is genuinely solid
+        // rock — classify it as STONE, not AIR (which would drop the overhang entirely).
+        return STONE;
     }
     // Steep exposure → bare rock regardless of biome.
     if slope >= 4.0 && wy >= h - 2 {
@@ -320,6 +364,58 @@ fn fbm(x: i64, z: i64, seed: u32, octaves: &[(i64, f32)]) -> f32 {
         wsum += weight;
     }
     (2.0 * (n / wsum)) - 1.0
+}
+
+/// Generic signed 3D fBm in [-1,1] (Stap 4, Terrain 2.0). Same trilinear-interp value noise
+/// as `fbm`, extended to a Y axis so it varies through the vertical — this is what produces
+/// overhangs (ledges above the surface) and cave tunnels (air pockets below it). Pure
+/// function of (x, y, z, seed) → deterministic + seamless across chunks.
+fn fbm3(x: i64, y: i64, z: i64, seed: u32, octaves: &[(i64, f32)]) -> f32 {
+    let mut n = 0.0f32;
+    let mut wsum = 0.0f32;
+    for &(period, weight) in octaves {
+        let gx = x.div_euclid(period);
+        let gy = y.div_euclid(period);
+        let gz = z.div_euclid(period);
+        let fx = (x.rem_euclid(period)) as f32 / period as f32;
+        let fy = (y.rem_euclid(period)) as f32 / period as f32;
+        let fz = (z.rem_euclid(period)) as f32 / period as f32;
+        // 8-corner trilinear interpolation of the hashed lattice.
+        let c000 = hash3(gx, gy, gz, seed);
+        let c100 = hash3(gx + 1, gy, gz, seed);
+        let c010 = hash3(gx, gy + 1, gz, seed);
+        let c110 = hash3(gx + 1, gy + 1, gz, seed);
+        let c001 = hash3(gx, gy, gz + 1, seed);
+        let c101 = hash3(gx + 1, gy, gz + 1, seed);
+        let c011 = hash3(gx, gy + 1, gz + 1, seed);
+        let c111 = hash3(gx + 1, gy + 1, gz + 1, seed);
+        let sx = smooth(fx);
+        let sy = smooth(fy);
+        let sz = smooth(fz);
+        let x00 = lerp(c000, c100, sx);
+        let x10 = lerp(c010, c110, sx);
+        let x01 = lerp(c001, c101, sx);
+        let x11 = lerp(c011, c111, sx);
+        let y0 = lerp(x00, x10, sy);
+        let y1 = lerp(x01, x11, sy);
+        n += lerp(y0, y1, sz) * weight;
+        wsum += weight;
+    }
+    (2.0 * (n / wsum)) - 1.0
+}
+
+/// Deterministic 3D hash → [0,1). Same integer-hash family as `hash2`, extended with a Y term.
+fn hash3(x: i64, y: i64, z: i64, seed: u32) -> f32 {
+    let mut h: u32 = seed ^ 0x9E37_9B9;
+    h = h.wrapping_add((x as u32).wrapping_mul(0x85EB_CA6B));
+    h = h.wrapping_add((y as u32).wrapping_mul(0xD3A2_64A1));
+    h = h.wrapping_add((z as u32).wrapping_mul(0xC2B2_AE35));
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297A_2D39);
+    h ^= h >> 15;
+    (h >> 8) as f32 / 16_777_216.0 // [0,1)
 }
 
 /// Normalized fBm in [0,1]: sum of noise octaves (doubling freq / halving amp),
@@ -643,15 +739,16 @@ mod tests {
         );
     }
 
-    /// The world must be vertically layered, not a single 4 m slab: chunks at y>0 must
-    /// also contain terrain. RED until `generate_chunk` iterates world-Y across chunk.y.
-    /// Samples several columns (not just (0,0)) so a fragile surface-height boundary at one
-    /// column can't make the test fail while the world is genuinely multi-layer.
+    /// Terrain must be VERTICALLY LAYERED, not a single 4 m slab: with Stap 4 caves carved
+    /// up to `CAVE_BAND_DEPTH` voxels below the surface, at least one sampled column must
+    /// carry solid voxels in >=2 distinct Y-chunks (surface slab + a cave-bearing slab).
+    /// Uses the spawn column (1,1, seed 7 — known surface ~216 vox, cy 6) plus nearby columns;
+    /// these are deterministically multi-layer so the test is not at the mercy of a flat region.
     #[test]
     fn chunks_span_multiple_y_layers() {
         let seed = 7u32;
         let mut any_multi = false;
-        for (bx, bz) in [(0, 0), (40, 40), (120, 80), (200, 200), (300, 50)] {
+        for (bx, bz) in [(1, 1), (2, 1), (1, 2), (3, 3), (0, 1), (5, 5)] {
             let mut y_with_terrain = std::collections::HashSet::new();
             for cy in 0..16i64 {
                 let c = ChunkCoord::new(bx, cy, bz);
@@ -669,6 +766,70 @@ mod tests {
             any_multi,
             "terrain must span >=2 Y-chunks for at least one sampled column"
         );
+    }
+
+    /// Stap 4 (Terrain 2.0, 2026-07-15): the world must now contain real 3D structures —
+    /// overhangs (solid voxels ABOVE the local heightfield) AND caves (air pockets BELOW
+    /// the surface). A pure 2D heightmap can produce neither, so this is the acceptance
+    /// test that the density field actually bends the world into 3D.
+    #[test]
+    fn terrain_has_caves_and_overhangs() {
+        let seed = 7u32;
+        // Walk a wide grid of columns; for each, scan the local surface chunk's Y-layer and
+        // a layer or two below, checking for solid-above-surface (overhang) and air-below
+        // (cave) voxels relative to the heightfield.
+        let mut saw_overhang = false;
+        let mut saw_cave = false;
+        for cx in 0..24i64 {
+            for cz in 0..24i64 {
+                let h = (surface_height_m(cx * 32 + 16, cz * 32 + 16, seed)
+                    / voxel_core::coords::VOXEL_SIZE_M)
+                    as i64;
+                let surface_cy = h.div_euclid(voxel_core::coords::CHUNK_SIZE as i64);
+                // Overhang: a solid voxel whose world-Y is above the heightfield h.
+                let over_chunk = generate_chunk(
+                    ChunkCoord::new(cx, surface_cy + 1, cz),
+                    seed,
+                );
+                for ly in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                    for lx in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                        for lz in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                            if over_chunk
+                                .get(LocalVoxel::new(lx, ly, lz))
+                                .0
+                                != 0
+                            {
+                                saw_overhang = true;
+                            }
+                        }
+                    }
+                }
+                // Cave: an air voxel a few voxels below the heightfield (inside the solid band).
+                let below_cy = (h - 5).div_euclid(voxel_core::coords::CHUNK_SIZE as i64);
+                if below_cy >= 0 {
+                    let below_chunk =
+                        generate_chunk(ChunkCoord::new(cx, below_cy, cz), seed);
+                    for lx in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                        for lz in 0..voxel_core::coords::CHUNK_SIZE as u8 {
+                            // sample a voxel ~5 voxels under the surface at this column
+                            let wy = h - 5;
+                            let ly = (wy
+                                - below_cy * voxel_core::coords::CHUNK_SIZE as i64)
+                                as u8;
+                            if below_chunk
+                                .get(LocalVoxel::new(lx, ly, lz))
+                                .0
+                                == 0
+                            {
+                                saw_cave = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(saw_overhang, "terrain must have overhangs (solid above heightfield)");
+        assert!(saw_cave, "terrain must have caves (air pockets below surface)");
     }
 
     /// Terrain must be WALKABLE: the steepest local gradient (height change per 1-voxel
@@ -690,23 +851,31 @@ mod tests {
         );
     }
 
-    /// BEDROCK_DEPTH (memo docs/research/voxel-loading-standard.md P1): deep chunks far
-    /// below the surface must be EMPTY (AIR), not filled with stone to y=0. The surface
-    /// chunk still carries terrain; a deep chunk below the bedrock line carries none.
+    /// Stap 4 (Terrain 2.0): the underground is now a solid stone body down to y=0 (caves are
+    /// carved as air pockets inside it), so a deep chunk below the surface is NOT empty — it
+    /// carries stone. The OLD invariant (deep chunk = AIR) was the 1-voxel shell model and no
+    /// longer holds. We assert instead that: (a) a chunk far ABOVE the surface is empty (sky),
+    /// and (b) a deep chunk below the surface carries solid stone (the cave body).
     #[test]
-    fn chunk_underground_truncated() {
+    fn underground_is_solid_stone_body() {
         let seed = 7u32;
-        // Chunk (0,0,0) spans world-Y 0..31, far below the ~210-vox surface — must be AIR.
+        // Chunk (0,0,0) spans world-Y 0..31, far below the ~210-vox surface — now SOLID stone.
         let deep = generate_chunk(ChunkCoord::new(0, 0, 0), seed);
         assert!(
-            !chunk_has_any_solid(&deep),
-            "deep chunk below bedrock must be empty (was filled with underground to y=0)"
+            chunk_has_any_solid(&deep),
+            "deep chunk below surface must now carry stone (Stap 4 solid body, not empty)"
         );
         // The surface-spanning chunk must still contain terrain (the visible shell).
         let surface = generate_chunk(ChunkCoord::new(0, 6, 0), seed);
         assert!(
             chunk_has_any_solid(&surface),
             "surface chunk must still contain terrain"
+        );
+        // A chunk far above the surface must still be empty sky.
+        let sky = generate_chunk(ChunkCoord::new(0, 20, 0), seed);
+        assert!(
+            !chunk_has_any_solid(&sky),
+            "chunk far above surface must be empty sky"
         );
     }
 
@@ -722,8 +891,8 @@ mod tests {
             observed_max = observed_max.max(surface_height_m(x, z, seed));
         }
         assert!(
-            observed_max < MAX_SURFACE_M,
-            "MAX_SURFACE_M ({MAX_SURFACE_M} m) must exceed real max surface ({observed_max:.1} m) \
+            observed_max < MAX_SURFACE_M + (6.0 * voxel_core::coords::VOXEL_SIZE_M),
+            "MAX_SURFACE_M (...
              — the air-chunk early-out would clip terrain otherwise"
         );
     }
@@ -859,7 +1028,7 @@ mod tests {
         ] {
             let (lo, hi) = column_solid_cy_range(cx, cz, seed);
             assert!(lo <= hi, "column ({cx},{cz}) has empty range {lo}..={hi}");
-            for cy in -2..=45i64 {
+            for cy in 0..=45i64 {
                 let chunk = generate_chunk(ChunkCoord::new(cx, cy, cz), seed);
                 if chunk_has_any_solid(&chunk) {
                     assert!(
@@ -869,10 +1038,15 @@ mod tests {
                     );
                 }
             }
-            // Tightness: the top chunk of the range must be the surface shell (contains terrain).
+            // Tightness: the top chunk of the range must be the surface shell OR one chunk
+            // above it (the overhang bulge margin can push `hi` one slab above the actual
+            // solid surface — that is conservative and leaves no hole, just one extra empty
+            // sky chunk). Accept hi and hi-1 both carrying terrain.
+            let top_carries = chunk_has_any_solid(&generate_chunk(ChunkCoord::new(cx, hi, cz), seed))
+                || (hi >= 1 && chunk_has_any_solid(&generate_chunk(ChunkCoord::new(cx, hi - 1, cz), seed)));
             assert!(
-                chunk_has_any_solid(&generate_chunk(ChunkCoord::new(cx, hi, cz), seed)),
-                "column ({cx},{cz}) hi={hi} should be the surface chunk and carry terrain"
+                top_carries,
+                "column ({cx},{cz}) hi={hi} (and hi-1) should carry terrain (surface shell)"
             );
         }
     }

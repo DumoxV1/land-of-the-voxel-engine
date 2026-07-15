@@ -127,7 +127,7 @@ fn main() {
                         }
                         let entry = mesh_cache.entry(coord).or_insert_with(|| {
                             let chunk = world.get_or_generate(coord);
-                            mesh_chunk_world_meters(&chunk, voxel_gpu::chunk_stream::Lod::Full, false)
+                            mesh_chunk_world_meters(&chunk, voxel_gpu::chunk_stream::Lod::Full, false, &[], 1024)
                         });
                         visible.extend_from_slice(entry);
                     }
