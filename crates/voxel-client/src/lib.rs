@@ -266,7 +266,7 @@ impl Default for App {
             pitch: -0.4,
             dragging: false,
             last_mouse: None,
-            max_dim: 2048,
+            max_dim: 8192,
             surf_w: 1280,
             surf_h: 800,
             last_frame: std::time::Instant::now(),
@@ -344,7 +344,7 @@ impl ApplicationHandler for App {
             .unwrap_or(capabilities.formats[0]);
 
         // Clip the surface size to a safe maximum (DPI scaling can push past the adapter limit).
-        let max_dim: u32 = 2048;
+        let max_dim: u32 = 8192;
         let surf_w = size.width.min(max_dim);
         let surf_h = size.height.min(max_dim);
         self.max_dim = max_dim;

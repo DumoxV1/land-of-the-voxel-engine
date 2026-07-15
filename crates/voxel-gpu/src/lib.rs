@@ -17,7 +17,7 @@ pub mod chunk_stream;
 /// through a channel. The `Gen` phase ships the raw chunk so player collision can run on
 /// freshly streamed terrain before the mesh is ready (A3: collision-first).
 use voxel_core::chunk::Chunk;
-use voxel_core::coords::{ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M};
+use voxel_core::coords::{ChunkCoord, CHUNK_SIZE, LocalVoxel, VOXEL_SIZE_M};
 use voxel_mesher::{Triangle, Vec3};
 
 /// Message from a streaming worker back to the render thread. Two phases so collision data
@@ -144,28 +144,45 @@ pub fn mesh_chunk_world_meters(
         .collect();
 
     if with_skirts {
-        // Hang a skirt from the chunk's bottom footprint downward by one coarse voxel-layer
-        // in world meters, so any seam step to a neighbour of different LOD is masked.
+        // Crack-free LOD seams: hang a skirt from the chunk's *actual surface* downward so
+        // any step to a neighbour of different LOD is masked. Two correctness fixes vs a
+        // naive box: (a) skip all-air chunks (otherwise empty slabs grow floating skirt
+        // boxes in the sky); (b) hang from the real surface top, not the chunk ceiling
+        // (hanging from the ceiling produced detached "spikes" above the terrain).
+        let mut surface_top_vox = -1i32;
+        for y in 0..CHUNK_SIZE as u8 {
+            for z in 0..CHUNK_SIZE as u8 {
+                for x in 0..CHUNK_SIZE as u8 {
+                    if chunk.get(LocalVoxel::new(x, y, z)).0 != 0 {
+                        surface_top_vox = surface_top_vox.max(y as i32);
+                    }
+                }
+            }
+        }
+        if surface_top_vox < 0 {
+            return tris; // all-air chunk: nothing to mask, no floating skirt
+        }
         let s = CHUNK_SIZE as f32 * voxel_scale; // chunk edge in world meters
         // `origin` is in voxel-units; convert to world meters (same transform as `to_world`).
         let ox = origin[0] * voxel_scale;
         let oz = origin[2] * voxel_scale;
         let base_y = origin[1] * voxel_scale; // chunk slab base in world meters
-        let skirt_drop = voxel_scale * 1.5; // ~1.5 coarse voxels downward
+        let surface_top = base_y + (surface_top_vox as f32 + 1.0) * voxel_scale;
+        let skirt_drop = voxel_scale * 4.0; // hang 4 coarse voxels down to mask LOD steps
+        let bot_y = (surface_top - skirt_drop).max(base_y);
         let mat = voxel_core::palette::MaterialId::from(2u8);
-        let mut push_quad = |x0: f32, x1: f32, z0: f32, z1: f32, top_y: f32| {
-            let bot_y = (top_y - skirt_drop).max(base_y - skirt_drop);
-            let a = Vec3::new(x0, top_y, z0);
-            let b = Vec3::new(x1, top_y, z0);
-            let c = Vec3::new(x1, top_y, z1);
-            let d = Vec3::new(x0, top_y, z1);
+        let mut push_quad = |x0: f32, x1: f32, z0: f32, z1: f32| {
+            // Four side walls of the skirt band, from surface_top down to bot_y.
+            let a = Vec3::new(x0, surface_top, z0);
+            let b = Vec3::new(x1, surface_top, z0);
+            let c = Vec3::new(x1, surface_top, z1);
+            let d = Vec3::new(x0, surface_top, z1);
             let e = Vec3::new(x0, bot_y, z0);
             let f = Vec3::new(x1, bot_y, z0);
             let g = Vec3::new(x1, bot_y, z1);
             let h = Vec3::new(x0, bot_y, z1);
             let n = Vec3::new(0.0, -1.0, 0.0);
             let ao = [1.0f32; 3];
-            // Two side walls (outer faces) of the skirt band.
             tris.push(Triangle { a: e, b: f, c: b, normal: n, material: mat, ao });
             tris.push(Triangle { a: e, b: b, c: a, normal: n, material: mat, ao });
             tris.push(Triangle { a: f, b: g, c: c, normal: n, material: mat, ao });
@@ -175,11 +192,8 @@ pub fn mesh_chunk_world_meters(
             tris.push(Triangle { a: h, b: e, c: a, normal: n, material: mat, ao });
             tris.push(Triangle { a: h, b: a, c: d, normal: n, material: mat, ao });
         };
-        // Skirt along the four chunk edges, hanging from the chunk's top surface height.
-        // For a solid ground block the top is at base_y + CHUNK_SIZE*voxel_scale; we hang
-        // from the chunk's highest solid layer to mask the seam step.
-        let top_y = base_y + CHUNK_SIZE as f32 * voxel_scale;
-        push_quad(ox, ox + s, oz, oz + s, top_y);
+        // Skirt along the four chunk edges (full footprint perimeter).
+        push_quad(ox, ox + s, oz, oz + s);
     }
 
     tris
