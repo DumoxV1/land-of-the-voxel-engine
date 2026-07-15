@@ -12,18 +12,24 @@ pub mod chunk_stream;
 ///
 /// Worldgen + greedy-meshing are pure CPU functions of `(ChunkCoord, seed)`:
 /// `voxel_worldgen::generate_chunk` then `voxel_mesher::greedy_mesh`. They never touch the
-/// GPU, so they can run on a rayon pool and stream the finished `Vec<Triangle>` back to the
-/// render thread through a channel. See `docs/milestone3-rayon-meshing.md`.
+/// GPU, so they run on a bounded worker pool (see `gpu_window` / `run_mesh_job`) and stream
+/// two-phase messages (`WorkerMsg::Gen` then `WorkerMsg::Mesh`) back to the render thread
+/// through a channel. The `Gen` phase ships the raw chunk so player collision can run on
+/// freshly streamed terrain before the mesh is ready (A3: collision-first).
 use voxel_core::chunk::Chunk;
 use voxel_core::coords::{ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M};
 use voxel_mesher::{Triangle, Vec3};
 
-/// A finished mesh produced off-thread, tagged with the generation it was requested for.
+/// Message from a streaming worker back to the render thread. Two phases so collision data
+/// arrives **before** the (more expensive) mesh:
+/// - `Gen`: phase-1 — the generated raw chunk. The client inserts it into its `World` so
+///   player collision can run on freshly streamed terrain immediately, without re-generating
+///   the chunk and without waiting for the mesh.
+/// - `Mesh`: phase-2 — the greedy-mesh triangles, inserted into the GPU mesh cache for drawing.
 #[derive(Debug, Clone)]
-pub struct MeshResult {
-    pub coord: ChunkCoord,
-    pub gen: u64,
-    pub tris: Vec<Triangle>,
+pub enum WorkerMsg {
+    Gen { coord: ChunkCoord, chunk: Chunk },
+    Mesh { coord: ChunkCoord, tris: Vec<Triangle> },
 }
 
 /// Convert a chunk-local mesh (vertices in voxel units) into canonical GPU world meters.
@@ -149,29 +155,27 @@ pub fn free_fly_step(
     e
 }
 
-/// Build a dedicated rayon pool that keeps one core free for the render thread.
-pub fn mesh_pool() -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_cpus::get().saturating_sub(1).max(1))
-        .build()
-        .expect("rayon mesh pool")
-}
-
-/// Spawn an off-thread generate+mesh for `coord`, sending the result on `tx`.
-/// CPU-only: must never touch the wgpu Device/Queue. `lod` downsamples distant chunks.
-pub fn spawn_mesh(
-    pool: &rayon::ThreadPool,
-    tx: &crossbeam_channel::Sender<MeshResult>,
-    coord: ChunkCoord,
-    gen: u64,
+/// Run one streaming job to completion on the calling thread, sending both worker messages
+/// in order: `Gen` (phase-1: raw chunk for collision) then `Mesh` (phase-2: triangles for
+/// drawing). CPU-only: never touches the wgpu Device/Queue. Used directly by the client's
+/// bounded worker pool and by tests (synchronous, no thread pool needed).
+pub fn run_mesh_job(
+    job: crate::chunk_stream::ChunkJob,
     seed: u32,
-    lod: crate::chunk_stream::Lod,
+    tx: &crossbeam_channel::Sender<WorkerMsg>,
 ) {
-    let tx = tx.clone();
-    pool.spawn(move || {
-        let chunk = voxel_worldgen::generate_chunk(coord, seed);
-        let tris = mesh_chunk_world_meters(&chunk, lod);
-        let _ = tx.send(MeshResult { coord, gen, tris });
+    let chunk = voxel_worldgen::generate_chunk(job.coord, seed);
+    // Phase 1: collision-first. Ship the raw chunk so the client World (player collision)
+    // has it immediately — no re-generate, no wait for the mesh.
+    let _ = tx.send(WorkerMsg::Gen {
+        coord: job.coord,
+        chunk: chunk.clone(),
+    });
+    // Phase 2: mesh-later. The (more expensive) greedy mesh follows.
+    let tris = mesh_chunk_world_meters(&chunk, job.lod);
+    let _ = tx.send(WorkerMsg::Mesh {
+        coord: job.coord,
+        tris,
     });
 }
 
@@ -207,10 +211,9 @@ mod tests {
 
     #[test]
     fn mesh_chunk_offthread_streams_result() {
-        // P3 proof: a chunk is generated+meshed on a rayon pool and arrives via the channel
+        // P3 proof: a chunk is generated+meshed and both phases arrive via the channel
         // without blocking the calling thread.
-        let pool = mesh_pool();
-        let (tx, rx) = crossbeam_channel::unbounded::<MeshResult>();
+        let (tx, rx) = crossbeam_channel::unbounded::<WorkerMsg>();
         // Use the chunk that actually contains the terrain surface (BEDROCK truncates deep
         // chunks to AIR, so cy=0 alone would be empty far below the ~26 m surface).
         let cx = 3i64;
@@ -219,27 +222,105 @@ mod tests {
             / voxel_core::coords::VOXEL_SIZE_M) as i64
             / 32;
         let coord = ChunkCoord::new(cx, cy, cz);
-        spawn_mesh(&pool, &tx, coord, 1, 7, crate::chunk_stream::Lod::Full);
-        let r = rx
+        run_mesh_job(
+            crate::chunk_stream::ChunkJob {
+                coord,
+                lod: crate::chunk_stream::Lod::Full,
+            },
+            7,
+            &tx,
+        );
+        // Gen (phase 1) arrives first.
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(WorkerMsg::Gen { coord: c, .. }) => assert_eq!(c, coord),
+            other => panic!("expected Gen first, got {other:?}"),
+        }
+        // Mesh (phase 2) follows.
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(WorkerMsg::Mesh { coord: c, tris }) => {
+                assert_eq!(c, coord);
+                assert!(!tris.is_empty(), "generated chunk must produce triangles");
+            }
+            other => panic!("expected Mesh second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worker_sends_gen_before_mesh() {
+        // A3 (collision-first) core guarantee: for every streamed job, the raw chunk (Gen)
+        // is delivered before its mesh. This is what lets player collision run on freshly
+        // streamed terrain immediately, instead of waiting for the (slower) mesh pass.
+        let (tx, rx) = crossbeam_channel::unbounded::<WorkerMsg>();
+        // Target the surface chunk of a column so the chunk actually carries terrain.
+        let cx = 2i64;
+        let cz = 3i64;
+        let cy = (voxel_worldgen::surface_height_m(cx * 32 + 16, cz * 32 + 16, 7)
+            / voxel_core::coords::VOXEL_SIZE_M) as i64
+            / 32;
+        let coord = ChunkCoord::new(cx, cy, cz);
+        run_mesh_job(
+            crate::chunk_stream::ChunkJob {
+                coord,
+                lod: crate::chunk_stream::Lod::Full,
+            },
+            7,
+            &tx,
+        );
+        let first = rx
             .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("mesh result should arrive off-thread");
-        assert_eq!(r.coord, coord);
-        assert_eq!(r.gen, 1);
-        assert!(!r.tris.is_empty(), "generated chunk must produce triangles");
+            .expect("first message arrives");
+        assert!(
+            matches!(first, WorkerMsg::Gen { .. }),
+            "phase-1 (Gen) must precede phase-2 (Mesh)"
+        );
+        // The Gen payload must be exactly the generated chunk for this coord (so the client
+        // can insert it into its World for collision — even an all-AIR chunk is valid; the
+        // point is the worker ships the raw data, not the mesh).
+        match first {
+            WorkerMsg::Gen { coord: c, chunk } => {
+                assert_eq!(c, coord);
+                let expected = voxel_worldgen::generate_chunk(coord, 7);
+                assert_eq!(
+                    chunk.is_empty(),
+                    expected.is_empty(),
+                    "Gen chunk must match the generated chunk for this coord"
+                );
+            }
+            _ => unreachable!(),
+        }
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(WorkerMsg::Mesh { coord: c, tris }) => {
+                assert_eq!(c, coord);
+                assert!(!tris.is_empty(), "surface chunk must produce a mesh");
+            }
+            other => panic!("expected Mesh, got {other:?}"),
+        }
     }
 
     #[test]
     fn streamed_mesh_is_in_chunk_world_meters() {
         // Chunk (2,0,3) spans x=8..12 m and z=12..16 m at 12.5 cm/voxel.
-        // The current bug leaves every mesh in local 0..32 voxel coordinates.
-        let pool = mesh_pool();
-        let (tx, rx) = crossbeam_channel::unbounded::<MeshResult>();
+        let (tx, rx) = crossbeam_channel::unbounded::<WorkerMsg>();
         let coord = ChunkCoord::new(2, 0, 3);
-        spawn_mesh(&pool, &tx, coord, 1, 7, crate::chunk_stream::Lod::Full);
-        let r = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("mesh must arrive");
-        let positions = r.tris.iter().flat_map(|t| [t.a, t.b, t.c]);
+        run_mesh_job(
+            crate::chunk_stream::ChunkJob {
+                coord,
+                lod: crate::chunk_stream::Lod::Full,
+            },
+            7,
+            &tx,
+        );
+        // Drain until the Mesh arrives (skip the Gen).
+        let tris = loop {
+            match rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("msg arrives")
+            {
+                WorkerMsg::Mesh { tris, .. } => break tris,
+                WorkerMsg::Gen { .. } => continue,
+            }
+        };
+        let positions = tris.iter().flat_map(|t| [t.a, t.b, t.c]);
         for p in positions {
             assert!(
                 (8.0..=12.0).contains(&p.x),
@@ -342,8 +423,7 @@ mod tests {
     fn drained_mesh_lands_in_cache_after_one_frame() {
         use std::collections::HashMap;
         use std::time::Duration;
-        let pool = mesh_pool();
-        let (tx, rx) = crossbeam_channel::unbounded::<MeshResult>();
+        let (tx, rx) = crossbeam_channel::unbounded::<WorkerMsg>();
         let coord = {
             let cx = 2i64;
             let cz = 2i64;
@@ -352,20 +432,29 @@ mod tests {
                 / 32;
             ChunkCoord::new(cx, cy, cz)
         };
-        let gen = 1u64;
-        spawn_mesh(&pool, &tx, coord, gen, 7, crate::chunk_stream::Lod::Full);
+        run_mesh_job(
+            crate::chunk_stream::ChunkJob {
+                coord,
+                lod: crate::chunk_stream::Lod::Full,
+            },
+            7,
+            &tx,
+        );
 
         let mut cache: HashMap<ChunkCoord, Vec<Triangle>> = HashMap::new();
-        let mut requested_gen: HashMap<ChunkCoord, u64> = HashMap::new();
-        requested_gen.insert(coord, gen);
 
         // Wait for the worker and drain it into the cache (mirrors: every frame the client
         // retries try_recv until the mesh arrives; here we prove it eventually lands).
-        let r = rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("mesh must arrive off-thread");
-        if requested_gen.get(&r.coord).copied() == Some(r.gen) {
-            cache.insert(r.coord, r.tris);
+        // The Gen (phase 1) is the collision chunk; the Mesh (phase 2) is what we draw.
+        let mut got_mesh = false;
+        while !got_mesh {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("msg arrives") {
+                WorkerMsg::Mesh { coord: c, tris } => {
+                    cache.insert(c, tris);
+                    got_mesh = true;
+                }
+                WorkerMsg::Gen { .. } => continue, // collision data; not drawn
+            }
         }
         assert!(
             cache.contains_key(&coord),

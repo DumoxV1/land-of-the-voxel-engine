@@ -14,7 +14,7 @@ use winit::window::{Window, WindowAttributes};
 
 use voxel_core::coords::{ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M};
 use voxel_gpu::renderer::{GpuCamera, GpuScene};
-use voxel_gpu::{mesh_chunk_world_meters, MeshResult};
+use voxel_gpu::{mesh_chunk_world_meters};
 use voxel_mesher::Triangle;
 use voxel_player::{Input, Player, PlayerController};
 use voxel_world::World;
@@ -140,8 +140,8 @@ struct App {
     // outrun the workers (real back-pressure vs the old unbounded rayon spawn).
     job_tx: Option<crossbeam_channel::Sender<voxel_gpu::chunk_stream::ChunkJob>>,
     workers: Vec<std::thread::JoinHandle<()>>,
-    mesh_tx: crossbeam_channel::Sender<MeshResult>,
-    mesh_rx: crossbeam_channel::Receiver<MeshResult>,
+    mesh_tx: crossbeam_channel::Sender<voxel_gpu::WorkerMsg>,
+    mesh_rx: crossbeam_channel::Receiver<voxel_gpu::WorkerMsg>,
     requests: RequestTracker,
     // Streaming scheduler: close→far priority, LOD rings, air-skip.
     scheduler: voxel_gpu::chunk_stream::ChunkScheduler,
@@ -173,7 +173,7 @@ struct App {
 impl Default for App {
     fn default() -> Self {
         let seed = 7u32;
-        let (mesh_tx, mesh_rx) = crossbeam_channel::unbounded::<MeshResult>();
+        let (mesh_tx, mesh_rx) = crossbeam_channel::unbounded::<voxel_gpu::WorkerMsg>();
         let n = num_mesh_workers();
         // Bounded job channel: capacity = workers*2 gives real back-pressure. Workers block
         // on recv(); the render thread's `try_send` simply drops the job (re-issued next
@@ -185,13 +185,11 @@ impl Default for App {
                 let tx = mesh_tx.clone();
                 std::thread::spawn(move || {
                     while let Ok(job) = rx.recv() {
-                        let chunk = voxel_worldgen::generate_chunk(job.coord, seed);
-                        let tris = mesh_chunk_world_meters(&chunk, job.lod);
-                        let _ = tx.send(MeshResult {
-                            coord: job.coord,
-                            gen: 0, // scheduler uses its own `seen` guard; gen is cosmetic here
-                            tris,
-                        });
+                        // A3 (collision-first): run the job as two phases — Gen (raw chunk for
+                        // collision) then Mesh (triangles for drawing) — so player collision
+                        // can run on freshly streamed terrain immediately, without waiting for
+                        // the mesh or re-generating the chunk on the render thread.
+                        voxel_gpu::run_mesh_job(job, seed, &tx);
                     }
                 })
             })
@@ -584,11 +582,14 @@ impl App {
             return;
         };
 
-        // --- (P3) Drain finished meshes from the worker channel (bounded per-frame budget).
-        //     Non-blocking: the render thread never generates/meshes a chunk itself. The
-        //     scheduler's `seen` guard (set when a job is planned, checked by the `ready`
-        //     closure against the cache) prevents re-requesting an already-cached chunk, so
-        //     no generation-counter stale-check is needed here.
+        // --- (P3 + A3) Drain finished worker messages (bounded per-frame budget). ---
+        //     Non-blocking: the render thread never generates/meshes a chunk itself.
+        //     - Gen  (phase-1): insert the raw chunk into the client World so player
+        //       collision can run on freshly streamed terrain immediately — no re-generate,
+        //       no wait for the mesh.
+        //     - Mesh (phase-2): insert the triangles into the GPU mesh cache for drawing.
+        //     The scheduler's `seen` guard (checked by the `ready` closure against the cache)
+        //     prevents re-requesting an already-cached chunk, so no gen-counter is needed.
         let mut budget = UPLOAD_BUDGET;
         while budget > 0 {
             let r = match self.mesh_rx.try_recv() {
@@ -596,7 +597,18 @@ impl App {
                 Err(_) => break,
             };
             budget -= 1;
-            self.mesh_cache.insert(r.coord, r.tris, self.frame);
+            match r {
+                voxel_gpu::WorkerMsg::Gen { coord, chunk } => {
+                    // Collision-first: feed the client World (player physics) without waiting
+                    // for the mesh. Avoid clobbering an edited chunk.
+                    if !self.world.dirty_chunks().contains(&coord) {
+                        self.world.insert(coord, chunk);
+                    }
+                }
+                voxel_gpu::WorkerMsg::Mesh { coord, tris } => {
+                    self.mesh_cache.insert(coord, tris, self.frame);
+                }
+            }
         }
 
         // --- Chunk-streaming: draw visible chunks; request missing ones off-thread. ---

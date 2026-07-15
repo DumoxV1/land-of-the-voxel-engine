@@ -51,6 +51,15 @@ impl World {
         self.get_or_generate(coord)
     }
 
+    /// Insert an already-generated chunk into the cache, replacing any existing entry.
+    /// Used by the streaming worker's phase-1 (collision-first): the worker generates a chunk
+    /// and ships the raw data back so the client `World` (which feeds player collision) has it
+    /// immediately — collision can run on freshly streamed terrain without waiting for the
+    /// mesh, and without the client re-generating the same chunk for `material_at`.
+    pub fn insert(&mut self, coord: ChunkCoord, chunk: Chunk) {
+        self.chunks.insert(coord, chunk);
+    }
+
     /// Read the material at a world position without returning an owned `Chunk`.
     ///
     /// Unlike `get_or_generate` (which clones the whole chunk), this returns just the
