@@ -57,6 +57,13 @@ pub fn mesh_chunk_imposter(chunk: &Chunk) -> Vec<Triangle> {
             }
         }
     }
+    // All-AIR chunk (e.g. sky above the terrain): no surface to stand in for, so emit
+    // nothing. Otherwise the far ring would paint a flat quad floating in the sky that
+    // pops out when the chunk switches to Full/Half meshing as you fly closer.
+    if top_y < 0 {
+        return Vec::new();
+    }
+
     let dominant = counts
         .into_iter()
         .max_by_key(|&(_, c)| c)
@@ -64,11 +71,7 @@ pub fn mesh_chunk_imposter(chunk: &Chunk) -> Vec<Triangle> {
         .unwrap_or(voxel_core::palette::MaterialId::from(0u8));
 
     // Surface height (world meters): chunk slab base + highest solid voxel, in voxel units.
-    let y_vox = if top_y >= 0 {
-        chunk.coord.y * CHUNK_SIZE + top_y as i64
-    } else {
-        chunk.coord.y * CHUNK_SIZE // all-AIR chunk: sit at its base
-    };
+    let y_vox = chunk.coord.y * CHUNK_SIZE + top_y as i64;
     let y = y_vox as f32 * VOXEL_SIZE_M;
 
     // Chunk footprint in world meters.
@@ -467,9 +470,10 @@ mod tests {
 
     #[test]
     fn lod_half_downsamples_to_double_scale() {
-        // A solid single voxel at local (0,0,0): Full meshes 1 voxel (12 tris) at 0.125 m,
-        // Half meshes 1 coarse voxel (12 tris) but at 0.25 m (2x) world scale. Both must
-        // produce a non-empty mesh; the Half mesh's world extent must be ~2x the Full.
+        // A solid single voxel at local (0,0,0): Full meshes 1 voxel at 0.125 m, Half
+        // meshes 1 coarse voxel at 0.25 m (2x) world scale. The voxel sits on the world
+        // floor (y=0), so its bottom face is culled against the bedrock floor (5 faces =
+        // 10 tris). Both must be non-empty; the Half mesh's world extent must be ~2x Full.
         use voxel_core::coords::LocalVoxel;
         use voxel_core::palette::MaterialId;
         let coord = ChunkCoord::new(5, 0, 5);
@@ -477,8 +481,8 @@ mod tests {
         full_chunk.set(LocalVoxel::new(0, 0, 0), MaterialId::from(2u8));
         let full = mesh_chunk_world_meters(&full_chunk, crate::chunk_stream::Lod::Full, false);
         let half = mesh_chunk_world_meters(&full_chunk, crate::chunk_stream::Lod::Half, false);
-        assert_eq!(full.len(), 12, "full-res single voxel = 12 tris");
-        assert_eq!(half.len(), 12, "half-res single block = 12 tris (one coarse voxel)");
+        assert_eq!(full.len(), 10, "full-res floor voxel = 10 tris (bottom culled on bedrock)");
+        assert_eq!(half.len(), 10, "half-res floor block = 10 tris (bottom culled on bedrock)");
         // Half mesh lives at 2x world scale -> its max vertex coordinate is ~2x the Full's.
         let full_max = full.iter().flat_map(|t| [t.a, t.b, t.c]).map(|v| v.x).fold(0.0f32, f32::max);
         let half_max = half.iter().flat_map(|t| [t.a, t.b, t.c]).map(|v| v.x).fold(0.0f32, f32::max);
@@ -512,6 +516,18 @@ mod tests {
         // Y must equal (slab*32 + 0) * VOXEL_SIZE_M (the single voxel at local y=0).
         let expected_y = (coord.y * 32) as f32 * VOXEL_SIZE_M;
         assert!((y0 - expected_y).abs() < 1e-3, "imposter height = chunk surface (got {y0}, want {expected_y})");
+    }
+
+    #[test]
+    fn imposter_of_air_chunk_is_empty() {
+        // Sky chunks (all AIR, high above the terrain) must NOT emit an imposter quad —
+        // otherwise the far ring paints flat squares floating in the sky that pop out
+        // when you fly closer and the chunk switches to Full/Half (empty) meshing.
+        use voxel_core::palette::MaterialId;
+        let coord = ChunkCoord::new(5, 20, 5); // way up in the sky
+        let chunk = Chunk::uniform(coord, MaterialId::from(0u8)); // all AIR
+        let imp = mesh_chunk_imposter(&chunk);
+        assert!(imp.is_empty(), "all-air chunk => no imposter quad (got {} tris)", imp.len());
     }
 
     /// Movement must be frame-rate independent: the same key held for the same wall-clock
