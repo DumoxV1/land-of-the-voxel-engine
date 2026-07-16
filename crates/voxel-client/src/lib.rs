@@ -194,6 +194,10 @@ pub struct App {
     time_of_day: f32,
     // Debug HUD (top-right): FPS + live stats, drawn after the voxel pass.
     hud: Option<hud::Hud>,
+    // Autonomous perf metrics: Hermes reads this to track regressions without the Tracy GUI.
+    // Writes a one-line sample to profile_metrics.log every ~1s (feature-independent so the
+    // normal build also produces telemetry Hermes can ingest).
+    perf_log_timer: std::time::Instant,
 }
 
 impl Default for App {
@@ -292,6 +296,7 @@ impl Default for App {
             surf_h: 800,
             last_frame: std::time::Instant::now(),
             time_of_day: 0.32, // F2 dag/nacht: start in de vroege ochtend (gouden uur)
+            perf_log_timer: std::time::Instant::now(),
         }
     }
 }
@@ -852,7 +857,33 @@ impl App {
                     plot!("chunks", self.mesh_cache.len() as f64);
                     plot!("tris", tris.len() as f64 / 3.0);
                 }
-                scene.queue().present(tex)
+                scene.queue().present(tex);
+                // Autonomous perf telemetry: Hermes reads profile_metrics.log to track
+                // regressions without the Tracy GUI. One sample/sec, feature-independent.
+                if self.perf_log_timer.elapsed().as_secs_f32() >= 1.0 {
+                    self.perf_log_timer = std::time::Instant::now();
+                    let dt = self.last_frame.elapsed().as_secs_f32().clamp(1e-4, 0.1);
+                    let fps = 1.0 / dt;
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("profile_metrics.log")
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(
+                                f,
+                                "ts={:.0} fps={:.1} chunks={} tris={} frame_ms={:.2}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0),
+                                fps,
+                                self.mesh_cache.len(),
+                                tris.len() / 3,
+                                dt * 1000.0,
+                            )
+                        });
+                }
             }
             Err(err) => log::error!(
                 "gpu_window: render failed (tris={}, surface={}x{}): {err:#}",
