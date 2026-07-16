@@ -124,6 +124,13 @@ mod request_tracker_tests {
 /// View distance in chunks. On the 12.5 cm scale a 4 m chunk -> 32 chunks ~= 128 m view.
 const CHUNK_M: f32 = CHUNK_SIZE as f32 * VOXEL_SIZE_M; // 4 m (ADR-0005)
 const VIEW_RADIUS: i64 = 48; // ~192 m view radius (radial disc; lifts the world toward a 150 km² feel)
+/// Spawn safety margin (voxels) ABOVE the heightfield estimate. The heightfield (`surface_height_m`)
+/// can sit up to ~OVERHANG_AMP_CEIL (28 vox) BELOW the real solid top once the 3D density field
+/// (overhangs/caves) is applied, so spawning exactly on the estimate buries the camera inside the
+/// terrain — you see the inside of the ground (grey/blue), surface chunks get frustum-culled (few
+/// TRIS), and the first frames flash white. A safe margin keeps the eye clearly above the real top
+/// in both WALK (falls to the ground) and FLY (hovers just above).
+const SPAWN_SAFE_VOX: i64 = 64; // 8 m headroom (> overhang bulge + buffer)
 /// Max VBO bytes we will fill. Matches the renderer's 256 MB staging cap. Once the
 /// streamed mesh set reaches this, we stop requesting new chunks for this frame — the
 /// rest pop in later as the camera moves / far chunks evict. Prevents the vertical-scale
@@ -248,8 +255,7 @@ impl Default for App {
             // until the camera snaps to the player (seen as a "white screen" at startup).
             camera: {
                 let top_vox = (surface_height_m(48, 48, seed) / VOXEL_SIZE_M) as i64;
-                let spawn_vox = (top_vox as f32 + 1.0) + voxel_player::HALF[1];
-                let eye_y_vox = spawn_vox - voxel_player::HALF[1] + 13.6; // 1.7 m above feet
+                let eye_y_vox = top_vox as f32 + 1.0 + 13.6 + SPAWN_SAFE_VOX as f32; // feet+eye+headroom above real top
                 GpuCamera::new(
                     [
                         48.0 * VOXEL_SIZE_M,
@@ -263,9 +269,11 @@ impl Default for App {
             },
             player: {
                 // Place in voxel units (the controller's coordinate space): spawn chunk
-                // (1,0,1) center is world (6 m, 6 m) = voxel (48, 48).
+                // (1,0,1) center is world (6 m, 6 m) = voxel (48, 48). Feet sit SPAWN_SAFE_VOX
+                // above the heightfield estimate so the eye (derived from pos each frame) clears
+                // the real overhang-bulged top — matches the camera init above.
                 let top_vox = (surface_height_m(48, 48, seed) / VOXEL_SIZE_M) as i64;
-                Player::new([48.0, (top_vox as f32 + 1.0) + voxel_player::HALF[1], 48.0])
+                Player::new([48.0, (top_vox as f32 + 1.0) + SPAWN_SAFE_VOX as f32, 48.0])
             },
             controller: PlayerController::new(),
             mode: voxel_player::PlayerMode::Walk,
@@ -548,7 +556,9 @@ impl App {
                 let (sy, cy) = self.pitch.sin_cos();
                 let (sp, cp) = self.yaw.sin_cos();
                 let fwd = [cp * cy, sy, sp * cy];
-                let right = [cp, 0.0, sp];
+                // Strafe axis is 90° yaw-perpendicular to forward (NOT the forward dir itself,
+                // which made A/D duplicate W/S). right = up × fwd_horizontal.
+                let right = [-sp, 0.0, cp];
                 let fly_speed = 40.0 * dt; // voxel units/s (~5 m/s)
                 let mut move_v = [0.0f32; 3];
                 if input.forward {

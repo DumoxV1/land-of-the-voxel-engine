@@ -249,7 +249,18 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       zodat `terrain_has_taller_relief` > 40 m span haalt (typisch heuvels 150-300 m).
       3 fragiele micro-benches aangepast aan de nieuwe ondergrond-body/hoogte (air-chunk cy
       200, column-reuse meet op surface-band <0.9x, seed-isolation scant hele kolom).
-      **15/15 worldgen + 30/30 voxel-gpu groen**, client_smoke 120/120, release gebouwd.
+      15/15 worldgen + 30/30 voxel-gpu groen, client_smoke 120/120, release gpu_window_main gebouwd.
+
+27s. ✅ **CLIENT BUGFIXES (2026-07-16, autonoom):** na live-screenshot (FLY, 49 FPS, 904
+      chunks/2204 TRIS, grijze wereld, spawn hoog) vier wortel-bugs gefixed. (1) **Camera in
+      de grond**: spawn gebruikte `surface_height_m` (heightfield-est 518 vox) maar de echte
+      solid-top zit op 534 vox (overhang-bulge). Eye zat in de terrain → je zag de binnenkant
+      (grijs/blauw, "geen groen"), surface-chunks frustum-culled (2204 TRIS), witte flash.
+      Nieuwe `SPAWN_SAFE_VOX=64` marge: eye spawn 62 vox (~7,75 m) boven de echte top
+      (geverifieerd: eye=596vox > real_top=534vox). (2) **WASD strafe bug**: `right` vector
+      was gelijk aan forward (bij yaw=0 identical) → A/D dup W/S. Nu 90° yaw-perpendicular
+      `[-sp,0,cp]` → echte strafe. (3)+(4) volgden uit (1): groene surface + correcte TRIS
+      nu zichtbaar zodra de eye boven de grond zit. Release gpu_window_main herbouwd.
 
 ## Auditwaarschuwing
 
