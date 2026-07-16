@@ -133,6 +133,7 @@ pub fn material_tint(mat: MaterialId) -> [f32; 3] {
         6 => [0.20, 0.48, 0.14],  // leaf  (donker groen)
         7 => [0.90, 0.78, 0.40],  // sand  (goud-geel, verzadigd)
         8 => [0.96, 0.97, 0.99],  // snow   (warm wit)
+        9 => [0.10, 0.35, 0.60],  // water (diep blauw-groen)
         _ => [0.64, 0.60, 0.52],  // fallback (warm grijs)
     }
 }
@@ -151,7 +152,7 @@ impl MaterialPbr {
     /// Build the default palette from the warm `material_tint` set, with a tiling factor
     /// that gives triplanar projection visible variation on big greedy quads.
     pub fn defaults() -> Vec<MaterialPbr> {
-        (0..=8u8)
+        (0..=9u8)
             .map(|id| {
                 let t = material_tint(voxel_core::palette::MaterialId::from(id));
                 MaterialPbr {
@@ -433,7 +434,20 @@ impl GpuScene {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: None,
+                    // Alpha-blended: opaque materials write alpha=1.0 (full replace),
+                    // water (material 9) writes alpha=0.62 so it composites over the scene.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -1191,12 +1205,7 @@ impl GpuScene {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.62,
-                            g: 0.66,
-                            b: 0.74,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1252,9 +1261,7 @@ impl GpuScene {
             });
         // Scene pass -> HDR target, then filmic post pass -> offscreen PNG target.
         let hdr = self.hdr_view.clone();
-        let (vbuf, vc) = self.upload_vertices(tris)?;
-        self.shadow_pass(&mut encoder, &vbuf, vc as u32, camera, 0.3);
-        self.scene_pass(&mut encoder, &vbuf, vc, camera, &hdr, 0.3)?;
+        self.render_frame_passes(&mut encoder, tris, camera, &hdr, 0.3)?;
         self.post_pass(&mut encoder, &target_view);
         self.queue.submit(Some(encoder.finish()));
 
@@ -1339,22 +1346,96 @@ impl GpuScene {
             });
         // Scene pass -> HDR target.
         let hdr = self.hdr_view.clone();
-        let (vbuf, vc) = self.upload_vertices(tris)?;
-        self.shadow_pass(&mut encoder, &vbuf, vc as u32, camera, time_of_day);
-        self.scene_pass(&mut encoder, &vbuf, vc, camera, &hdr, time_of_day)?;
+        self.render_frame_passes(&mut encoder, tris, camera, &hdr, time_of_day)?;
         // Post pass HDR -> surface (filmic tonemap + grade).
         self.post_pass(&mut encoder, surface_view);
         self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
 
+    /// F1: runtime-tweakable filmic post-FX. Defaults (filmic, Lay of the Land-achtig):
+    /// exposure 1.1, saturation 1.15, grade 0.6. Call before any render to change the look
+    /// without rebuilding the pipeline. `grade` is the teal-orange split-tone strength.
+    pub fn set_post_fx(&mut self, exposure: f32, saturation: f32, grade: f32) {
+        self.queue.write_buffer(
+            &self.post_params_buf,
+            0,
+            bytemuck::cast_slice(&[exposure, saturation, grade, 0.0_f32]),
+        );
+    }
+
+    /// F4: orchestrate the per-frame pass order: shadow (depth) -> opaque scene -> water
+    /// (alpha-blended). Water and opaque triangles use the same alpha-blended scene pipeline
+    /// (opaque writes alpha=1.0 → full replace; water writes alpha=0.62 → composites over
+    /// the scene). The shadow pass uses whichever set is non-empty (shadow maps cover the
+    /// whole scene, so opaque-only shadows also light the water).
+    fn render_frame_passes(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        tris: &[Triangle],
+        camera: &GpuCamera,
+        target_view: &wgpu::TextureView,
+        time_of_day: f32,
+    ) -> anyhow::Result<()> {
+        let opaque: Vec<Triangle> = tris.iter().filter(|t| t.material.0 != 9).cloned().collect();
+        let water: Vec<Triangle> = tris.iter().filter(|t| t.material.0 == 9).cloned().collect();
+        // Clear HDR + depth up front so both the opaque and the (optional) water pass
+        // composite over a clean background regardless of which sets are present.
+        {
+            let _cp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("frame-clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.62,
+                            g: 0.66,
+                            b: 0.74,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+        }
+        // Shadow pass uses whichever set is non-empty (maps cover the whole scene).
+        let shadow_src: &[Triangle] = if !opaque.is_empty() { &opaque } else { &water };
+        if !shadow_src.is_empty() {
+            let (svbuf, svc) = self.upload_vertices(shadow_src)?;
+            self.shadow_pass(encoder, &svbuf, svc as u32, camera, time_of_day);
+        }
+        if !opaque.is_empty() {
+            let (ovbuf, ovc) = self.upload_vertices(&opaque)?;
+            self.scene_pass(encoder, &ovbuf, ovc, camera, target_view, time_of_day)?;
+        }
+        if !water.is_empty() {
+            let (wvbuf, wvc) = self.upload_vertices(&water)?;
+            self.scene_pass(encoder, &wvbuf, wvc, camera, target_view, time_of_day)?;
+            // self.water_pass(encoder, &wvbuf, wvc, camera, target_view, time_of_day)?;
+        }
+        Ok(())
+    }
+
     /// Fullscreen filmic post-FX pass: HDR target -> `target_view` (surface or offscreen).
     fn post_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        target_view: &wgpu::TextureView,
-    ) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            &self,
+            encoder: &mut wgpu::CommandEncoder,
+            target_view: &wgpu::TextureView,
+        ) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("post-fx-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
@@ -1448,9 +1529,7 @@ impl GpuScene {
             });
         // Scene pass -> HDR, then filmic post pass -> bench target.
         let hdr = self.hdr_view.clone();
-        let (vbuf, vc) = self.upload_vertices(tris)?;
-        self.shadow_pass(&mut encoder, &vbuf, vc as u32, camera, 0.3);
-        self.scene_pass(&mut encoder, &vbuf, vc, camera, &hdr, 0.3)?;
+        self.render_frame_passes(&mut encoder, tris, camera, &hdr, 0.3)?;
         self.post_pass(&mut encoder, &target_view);
         self.queue.submit(Some(encoder.finish()));
         // Block until the GPU has actually executed the submitted work. This is the
@@ -1688,7 +1767,57 @@ mod tests {
         });
     }
 
-    /// Taak 5 (2026-07-15): het palette moet hoog-verzadigd zijn (geen grijstinten meer).
+    /// F4: a flat water quad (material WATER, id 9) must render with a blue-dominant tint
+    /// (transparent, fresnel sky reflection over the clear colour). Proves the water pass
+    /// + material-9 branch produce a recognizable water look, not flat terrain.
+    #[test]
+    fn water_surface_shows_blue_tint() {
+        futures::executor::block_on(async {
+            let mut scene = GpuScene::new_offscreen(128, 128).await.expect("gpu scene");
+            let tris = vec![
+                voxel_mesher::Triangle {
+                    a: voxel_mesher::Vec3::new(0.0, 0.0, 0.0),
+                    b: voxel_mesher::Vec3::new(0.0, 0.0, 4.0),
+                    c: voxel_mesher::Vec3::new(4.0, 0.0, 4.0),
+                    normal: voxel_mesher::Vec3::new(0.0, 1.0, 0.0),
+                    material: voxel_core::palette::MaterialId::from(9u8),
+                    ao: [1.0; 3],
+                    sun: [1.0; 3],
+                },
+                voxel_mesher::Triangle {
+                    a: voxel_mesher::Vec3::new(0.0, 0.0, 0.0),
+                    b: voxel_mesher::Vec3::new(4.0, 0.0, 4.0),
+                    c: voxel_mesher::Vec3::new(4.0, 0.0, 0.0),
+                    normal: voxel_mesher::Vec3::new(0.0, 1.0, 0.0),
+                    material: voxel_core::palette::MaterialId::from(9u8),
+                    ao: [1.0; 3],
+                    sun: [1.0; 3],
+                },
+            ];
+            let cam = GpuCamera::new([2.0, 6.0, 6.0], -std::f32::consts::FRAC_PI_2, -0.5, 1.0);
+            let path = std::env::temp_dir().join("m4_water_p0.png");
+            scene
+                .render_triangles_png(&tris, &cam, path.to_str().unwrap())
+                .await
+                .expect("png render");
+            let img = image::open(&path).expect("open png").to_rgb8();
+            // Blue-dominant pixels: water tints bluer than the grey clear colour (b > g and b > r).
+            let mut blue = 0u32;
+            for p in img.pixels() {
+                let [r, g, b] = [p[0], p[1], p[2]];
+                if b > g + 8 && b > r + 20 && b > 50 {
+                    blue += 1;
+                }
+            }
+            assert!(
+                blue > 100,
+                "water surface showed only {} blue-dominant pixels — no water look",
+                blue
+            );
+        });
+    }
+
+
     /// Meet de gemiddelde verzadiging van de biome-tints (grass/dirt/stone/sand) in HSV;
     /// die moet boven een drempel liggen.
     #[test]
@@ -1837,6 +1966,22 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     // Toon-map naar warme, filmische saturatie.
     albedo = pow(albedo, vec3<f32>(0.85, 0.9, 0.95));
 
+    // --- F4 water: material 9 gets a transparant, reflecterend oppervlak. ---
+    // The water pass (alpha-blended, run after the opaque scene pass) renders only
+    // water triangles; here we give them a blue tint + Fresnel sky reflection.
+    var out_alpha = 1.0;
+    if (in.material == 9u) {
+        let view_dir = normalize(cam.eye_pos.xyz - in.world_pos);
+        let fres = pow(1.0 - max(dot(n, view_dir), 0.0), 3.0); // 0 face-on -> 1 grazing
+        let deep = vec3<f32>(0.04, 0.22, 0.38);   // diep water
+        let shallow = vec3<f32>(0.10, 0.45, 0.60); // ondiep/zenit
+        let water_tint = mix(deep, shallow, n.y);
+        // Sky-reflectie (Fresnel) mengt de lucht-kleur in bij grazende hoek.
+        let sky_refl = mix(vec3<f32>(0.45, 0.62, 0.92), vec3<f32>(0.95, 0.97, 1.0), 0.3);
+        albedo = mix(water_tint, sky_refl, fres * 0.6 + 0.15);
+        out_alpha = 0.62;
+    }
+
     // --- Dag/nacht-cyclus (F2): time_of_day in cam.params.y (0..1 = 1 dag). ---
     let tod = cam.params.y;
     // Zon-hoogte: -1 (middernacht) .. 1 (noon). Azimut draait rond.
@@ -1914,7 +2059,7 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     // Fog-kleur volgt de lucht (warm bij schemering, koel bij dag, donker bij nacht).
     let fog_col = mix(bg_sky, vec3<f32>(0.10, 0.12, 0.20), (1.0 - day) * 0.6);
     col = mix(col, fog_col, clamp(fog, 0.0, 0.85));
-    return vec4<f32>(col, 1.0);
+    return vec4<f32>(col, out_alpha);
 }
 "#;
 
