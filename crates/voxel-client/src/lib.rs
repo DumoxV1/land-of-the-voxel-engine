@@ -840,8 +840,10 @@ impl App {
                         ..Default::default()
                     });
                     hud.draw(&mut enc, &view);
+                    #[cfg(feature = "tracy")]
+                    let _gpu_span = span!("gpu_submit");
                     scene.queue().submit(Some(enc.finish()));
-                }
+                    }
                 #[cfg(feature = "tracy")]
                 {
                     // Live Tracy plots: key streaming/perf metrics surfaced in the profiler UI.
