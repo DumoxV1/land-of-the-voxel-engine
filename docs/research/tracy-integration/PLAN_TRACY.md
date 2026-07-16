@@ -50,6 +50,10 @@ die dit patroon voor elke Rust/wgpu-engine vastlegt.
    - `RedrawRequested` handler: `let _span = span!("frame");` + `frame_mark!();` per frame.
    - `render_frame`: `let _span = span!("scheduler_plan");` rond `scheduler.plan(...)`.
    - Worker-thread (job-loop): `let _span = span!("worker_job");` per `run_mesh_job`.
+   - **Worker Gen/Mesh split** (in `voxel-gpu::run_mesh_job`, feature forward via
+     `voxel-client/tracy -> voxel-gpu/tracy`): aparte `worker_gen` (generate_chunk) en
+     `worker_mesh` (6 neighbours + greedy mesh) zones, zodat Tracy laat zien welke fase
+     de bottleneck is.
 4. **Plots** (cfg-gated block in `render_frame`, na de draw): `plot!("fps", ...)`,
    `plot!("chunks", ...)`, `plot!("tris", ...)`. Waarden zijn `f64`.
 5. **GPU**: CPU-zone rond `queue.submit` (fase 1). TODO: wgpu TimestampQuery (fase 2).

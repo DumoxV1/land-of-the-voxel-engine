@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Tracy real-time frame profiler. OFF by default (no LAN broadcast, no C++ client dep).
+# The client forwards this feature when built with `--features tracy`.
+tracy = ["dep:tracy-client"]
+
 [dependencies]
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
@@ -16,6 +21,7 @@ anyhow = "1"
 winit = "0.30"
 crossbeam-channel = "0.5"
 num_cpus = "1"
+tracy-client = { version = "0.18", features = ["enable"], optional = true }
 voxel-core = { path = "../voxel-core" }
 voxel-mesher = { path = "../voxel-mesher" }
 voxel-world = { path = "../voxel-world" }

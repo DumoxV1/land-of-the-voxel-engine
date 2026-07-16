@@ -7,7 +7,8 @@ license.workspace = true
 [features]
 # Tracy real-time frame profiler. OFF by default: enabling broadcasts discovery packets
 # on the local network and pulls in the C++ Tracy client. Only enable for profiling runs.
-tracy = ["dep:tracy-client"]
+# Forwards to voxel-gpu so the worker-pool Gen/Mesh phases are also instrumented.
+tracy = ["dep:tracy-client", "voxel-gpu/tracy"]
 
 [dependencies]
 wgpu = "30"

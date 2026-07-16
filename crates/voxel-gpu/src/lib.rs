@@ -9,6 +9,9 @@ pub mod cache;
 pub mod chunk_stream;
 pub mod sunlight;
 
+#[cfg(feature = "tracy")]
+use tracy_client::span;
+
 /// Mijlpaal 3 (P3): non-blocking chunk meshing.
 ///
 /// Worldgen + greedy-meshing are pure CPU functions of `(ChunkCoord, seed)`:
@@ -306,30 +309,39 @@ pub fn run_mesh_job(
     seed: u32,
     tx: &crossbeam_channel::Sender<WorkerMsg>,
 ) {
-    let chunk = voxel_worldgen::generate_chunk(job.coord, seed);
+    // Phase 1 (Gen): generate the raw chunk for collision, ship it immediately.
+    let chunk = {
+        #[cfg(feature = "tracy")]
+        let _span = span!("worker_gen");
+        voxel_worldgen::generate_chunk(job.coord, seed)
+    };
     // Phase 1: collision-first. Ship the raw chunk so the client World (player collision)
     // has it immediately — no re-generate, no wait for the mesh.
     let _ = tx.send(WorkerMsg::Gen {
         coord: job.coord,
         chunk: chunk.clone(),
     });
-    // Phase 2: mesh-later. The (more expensive) greedy mesh follows.
-    // Stap 3: also generate the 6 direct neighbour chunks (4 horizontal + chunk above/below)
-    // so sunlight can flow across chunk boundaries, and a generous y_max covering the full
-    // world height (terrain can reach ~119 m; 1024 vox ≈ 128 m is safe headroom).
-    let y_max = 1024; // world-voxel ceiling for sunlight seeding (covers all real terrain)
-    let neighbours: Vec<Chunk> = [
-        (job.coord.x + 1, job.coord.y, job.coord.z),
-        (job.coord.x - 1, job.coord.y, job.coord.z),
-        (job.coord.x, job.coord.y, job.coord.z + 1),
-        (job.coord.x, job.coord.y, job.coord.z - 1),
-        (job.coord.x, job.coord.y + 1, job.coord.z),
-        (job.coord.x, job.coord.y - 1, job.coord.z),
-    ]
-    .iter()
-    .map(|&(x, y, z)| voxel_worldgen::generate_chunk(ChunkCoord::new(x, y, z), seed))
-    .collect();
-    let tris = mesh_chunk_world_meters(&chunk, job.lod, false, &neighbours, y_max);
+    // Phase 2 (Mesh): generate 6 neighbours for sunlight, then greedy-mesh.
+    let tris = {
+        #[cfg(feature = "tracy")]
+        let _span = span!("worker_mesh");
+        // Stap 3: also generate the 6 direct neighbour chunks (4 horizontal + chunk above/below)
+        // so sunlight can flow across chunk boundaries, and a generous y_max covering the full
+        // world height (terrain can reach ~119 m; 1024 vox ≈ 128 m is safe headroom).
+        let y_max = 1024; // world-voxel ceiling for sunlight seeding (covers all real terrain)
+        let neighbours: Vec<Chunk> = [
+            (job.coord.x + 1, job.coord.y, job.coord.z),
+            (job.coord.x - 1, job.coord.y, job.coord.z),
+            (job.coord.x, job.coord.y, job.coord.z + 1),
+            (job.coord.x, job.coord.y, job.coord.z - 1),
+            (job.coord.x, job.coord.y + 1, job.coord.z),
+            (job.coord.x, job.coord.y - 1, job.coord.z),
+        ]
+        .iter()
+        .map(|&(x, y, z)| voxel_worldgen::generate_chunk(ChunkCoord::new(x, y, z), seed))
+        .collect();
+        mesh_chunk_world_meters(&chunk, job.lod, false, &neighbours, y_max)
+    };
     let _ = tx.send(WorkerMsg::Mesh {
         coord: job.coord,
         tris,
