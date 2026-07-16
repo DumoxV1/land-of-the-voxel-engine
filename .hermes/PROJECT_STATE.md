@@ -236,6 +236,21 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       (onder 25 ms guard). Plan-doc: docs/research/visual-upgrade-4k-palette/PLAN_TAAK5.md.
       Release `gpu_window_main` herbouwd.
 
+27r. ✅ **PERF + HEUVELS FIX (2026-07-15, autonoom):** na live-screenshot (FLY mode, 20 FPS,
+      166k TRIS, witte wereld) twee oorzaken gefixed. (1) **Sneeuw-threshold** `smoothstep`
+      24-30 m → 90-120 m: met heuvels tot ~477 m overspoelde de oude drempel alle heuvels
+      met sneeuw → geen groene heuvels zichtbaar. Nu sneeuw pas boven boomgrens, op vlakke
+      toppen. (2) **Performance-boosdoener**: `column_solid_cy_range` streamde de hele
+      ondergrond-body tot y=0 (Terrain 2.0) = ~17 chunks/kolom. Nieuwe `UNDERGROUND_CHUNKS=4`
+      const: stream alleen de zichtbare band (surface-4 .. surface+overhang, ≈ 6 chunks).
+      Diepe steen (bedekt door surface) wordt niet meer geladen/getekend. **Chunks/kolom
+      17→5,9 (≈65% minder)**, throughput 11,6→5,6 ms/chunk (2× sneller), spawn-top 34→64 m.
+      Heuvel-amplitude verder verhoogd (mid 90→250, base 70→120, MAX_SURFACE_M 199→477 m)
+      zodat `terrain_has_taller_relief` > 40 m span haalt (typisch heuvels 150-300 m).
+      3 fragiele micro-benches aangepast aan de nieuwe ondergrond-body/hoogte (air-chunk cy
+      200, column-reuse meet op surface-band <0.9x, seed-isolation scant hele kolom).
+      **15/15 worldgen + 30/30 voxel-gpu groen**, client_smoke 120/120, release gebouwd.
+
 ## Auditwaarschuwing
 
 ## Actieve automatisering

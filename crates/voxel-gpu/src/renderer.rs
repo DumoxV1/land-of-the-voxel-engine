@@ -1209,10 +1209,11 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     // kleur houden in plaats van grijs weg te vallen.
     let rock = vec3<f32>(0.58, 0.46, 0.32);
     let snow = vec3<f32>(0.96, 0.97, 0.99);
-    // Rots verschijnt op steile hellingen; sneeuw boven ~26 m wereld-hoogte. rock_mix
-    // verlaagd (0.6->0.35) zodat de biome-tint doorschijnt op gematigde hellingen.
+    // Taak 5 fix: sneeuw pas BOVEN de boomgrens (~90 m), en alleen op vlakke toppen
+    // (steile hellingen blijven rots). Vorige drempel (24-30 m) overspoelde alle heuvels
+    // nu de surface tot ~199 m gaat -> witte wereld, geen groene heuvels.
     let rock_mix = smoothstep(0.45, 0.85, slope) * 0.35;
-    let snow_mix = smoothstep(24.0, 30.0, p.y) * (1.0 - slope * 0.5);
+    let snow_mix = smoothstep(90.0, 120.0, p.y) * (1.0 - slope);
     albedo = mix(albedo, rock, rock_mix);
     albedo = mix(albedo, snow, snow_mix);
     // Toon-map naar warme, filmische saturatie.
