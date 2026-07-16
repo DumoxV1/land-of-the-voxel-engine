@@ -285,6 +285,20 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       NIET binden (RESOURCE vs DEPTH_WRITE conflict) → aparte `shadow_pass_bgl`/`shadow_pass_bg`
       (alleen vp-uniform). Verificatie: 30/30 lib-tests (pixel-oracle PNG loopt nu door
       shadow→scene→post→PNG), client_smoke 120/120 frames, release-build groen.
+
+27v. ✅ **F4 WATER — transparant reflecterend water-oppervlak (2026-07-16, autonoom onder Genesis OS v2.3):**
+      Materiaal **9 (WATER)** toegevoegd aan palette (blauw `[0.10,0.35,0.60]`) + `MaterialPbr::defaults()`
+      verbreed naar `(0..=9)`. Shader `fs_main` krijgt een water-branch: diepe/ondiepe blauwe tint +
+      Fresnel-sky-reflectie, `alpha = 0.62`. **Transparantie-aanpak:** de **scene-pipeline zelf** krijgt
+      `blend: alpha` (SrcAlpha/OneMinusSrcAlpha) — opaque materialen schrijven `alpha=1.0` (volledige
+      replace), water schrijft `0.62` (composite over de scène). **GEEN aparte water-pass**: een losse
+      `water_pipeline` (eigen pass) bleek een **no-op draw** (werd gecleared maar tekende niet, oorzaak
+      niet achterhaald in wgpu 0.30 — waarschijnlijk pipeline/attachment drop). De scene-pipeline-blend
+      dekt beide met één pipeline. `render_frame_passes` splitst opaque/water en doet een clear-pass
+      (HDR + depth) zodat water ook composited over een cleane achtergrond als er géén opaque tris zijn.
+      `set_post_fx(exposure, saturation, grade)` publieke methode toegevoegd (F1-instelbaarheid, runtime
+      zonder pipeline-rebuild). Verificatie: water-test `water_surface_shows_blue_tint` (1978 blue px),
+      31/31 lib groen, client_smoke 120/120. Gepusht als `af19abf`.
       **Geverifieerd:** voxel-gpu build groen; 30/30 lib-tests (PNG-oracle loopt nu HDR→post→PNG);
       client_smoke --release 120/120 frames no panic; throughput_baseline --release groen.
       (Debug-build throughput faalt op gen+mesh 53,9 ms/chunk <25 eis — pre-existing debug-profile
