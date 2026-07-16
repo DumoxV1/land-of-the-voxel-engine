@@ -16,6 +16,10 @@
 //!   shipped first) then `Mesh` (triangles for drawing) — collision-first (A3).
 
 mod hud; // debug HUD: bitmap-font FPS/stats overlay, drawn after the voxel pass.
+mod profiling; // Tracy real-time frame profiler (behind `tracy` feature flag).
+
+#[cfg(feature = "tracy")]
+use tracy_client::{plot, span};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -211,6 +215,7 @@ impl Default for App {
                         // collision) then Mesh (triangles for drawing) — so player collision
                         // can run on freshly streamed terrain immediately, without waiting for
                         // the mesh or re-generating the chunk on the render thread.
+                        let _span = span!("worker_job");
                         voxel_gpu::run_mesh_job(job, seed, &tx);
                     }
                 })
@@ -501,8 +506,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let _span = span!("frame");
                 self.update_camera();
                 self.render_frame();
+                // Mark the end of the frame for Tracy's frame-time graph.
+                frame_mark!();
                 // Continuous rendering: ask for the next frame. If the surface is
                 // lost we simply skip and the loop keeps trying next event.
                 if let Some(w) = &self.window {
@@ -670,6 +678,7 @@ impl App {
         // We then frustum-cull EACH job BEFORE handing it to the bounded worker pool, so we
         // never generate/mesh a chunk the camera can't see (the old loop only frustum-culled
         // at draw time, still paying for chunks behind the player).
+        let _span = span!("scheduler_plan");
         let jobs = self.scheduler.plan(
             ccx,
             ccz,
@@ -833,6 +842,14 @@ impl App {
                     hud.draw(&mut enc, &view);
                     scene.queue().submit(Some(enc.finish()));
                 }
+                #[cfg(feature = "tracy")]
+                {
+                    // Live Tracy plots: key streaming/perf metrics surfaced in the profiler UI.
+                    let frame_dt = self.last_frame.elapsed().as_secs_f32().clamp(1e-4, 0.1);
+                    plot!("fps", (1.0 / frame_dt) as f64);
+                    plot!("chunks", self.mesh_cache.len() as f64);
+                    plot!("tris", tris.len() as f64 / 3.0);
+                }
                 scene.queue().present(tex)
             }
             Err(err) => log::error!(
@@ -849,6 +866,8 @@ impl App {
 /// closes. Kept thin on purpose — all client logic lives in `App` (this `lib.rs`).
 pub fn run() {
     env_logger::init();
+    // Start the Tracy client if the `tracy` feature is enabled (no-op otherwise).
+    crate::profiling::start();
     println!(
         "Land of the Voxel Engine — micro-voxel client (12.5 cm/voxel, {} m chunks, view radius {} chunks ~{:.0} m)",
         CHUNK_M, VIEW_RADIUS, VIEW_RADIUS as f32 * CHUNK_M

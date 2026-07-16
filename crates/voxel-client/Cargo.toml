@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Tracy real-time frame profiler. OFF by default: enabling broadcasts discovery packets
+# on the local network and pulls in the C++ Tracy client. Only enable for profiling runs.
+tracy = ["dep:tracy-client"]
+
 [dependencies]
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
@@ -22,6 +27,10 @@ voxel-world = { path = "../voxel-world" }
 voxel-worldgen = { path = "../voxel-worldgen" }
 voxel-player = { path = "../voxel-player" }
 voxel-gpu = { path = "../voxel-gpu" }
+# Tracy v0.13.1 client (tracy-client-sys 0.28.0). Pinned to match the profiler GUI the user
+# downloads. `enable` turns on the actual instrumentation; behind the `tracy` feature so the
+# default build stays Tracy-free (no C++ TU compile, no LAN broadcast).
+tracy-client = { version = "0.18", features = ["enable"], optional = true }
 
 [dev-dependencies]
 voxel-worldgen = { path = "../voxel-worldgen" }
