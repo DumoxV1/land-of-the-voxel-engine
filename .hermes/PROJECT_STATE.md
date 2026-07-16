@@ -272,6 +272,19 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       `build_post_resources`; `render_to_view`/`render_triangles_png`/`render_triangles` route
       scene→HDR→post. wgpu 0.30 gotcha's: `bind_group_layouts: &[Some(&bgl)]`, `immediate_size: 0`
       (geen `push_constant_ranges`), hdr_view gecloned vóór `&mut self` record_pass-call.
+
+27u. ✅ **F3 CASCADED SHADOWS — zon-schaduw met 3 cascades (2026-07-16, autonoom onder Genesis OS v2.3):**
+      **Diepte-pass** rendert de scène vanuit de zon-richting naar 3 **cascade shadow-maps**
+      (Depth32Float, 2048²) rond de camera (radii 40/160/640 m). De **scene-pass** sampled de
+      juiste cascade per fragment-afstand via `textureSampleCompare` (PCF) en vermenigvuldigt de
+      `diff`-term → harde contact-schaduw op hellingen/objecten, bovenop de BFS-zonlicht (F-stap 3).
+      Architectuur: `GpuCamera::sun_direction`/`sun_view_proj` (ortho light-VP, aligneert met de
+      `fs_main` zon-formule); `CameraUniform` krijgt `sun_dir` + 3 cascade-VP's + splits;
+      `record_pass` gesplitst in `upload_vertices` → `shadow_pass` → `scene_pass` → `post_pass`
+      (schaduw EERST, anders alles-in-schaduw). **wgpu 0.30 gotcha:** shadow-pass BGL mag de maps
+      NIET binden (RESOURCE vs DEPTH_WRITE conflict) → aparte `shadow_pass_bgl`/`shadow_pass_bg`
+      (alleen vp-uniform). Verificatie: 30/30 lib-tests (pixel-oracle PNG loopt nu door
+      shadow→scene→post→PNG), client_smoke 120/120 frames, release-build groen.
       **Geverifieerd:** voxel-gpu build groen; 30/30 lib-tests (PNG-oracle loopt nu HDR→post→PNG);
       client_smoke --release 120/120 frames no panic; throughput_baseline --release groen.
       (Debug-build throughput faalt op gen+mesh 53,9 ms/chunk <25 eis — pre-existing debug-profile

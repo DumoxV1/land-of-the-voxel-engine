@@ -38,6 +38,12 @@ pub struct CameraUniform {
     pub fog_color: [f32; 4],
     pub params: [f32; 4],  // x = fog_density, y = time_of_day (0..1, F2 dag/nacht), z/w reserved
     pub eye_pos: [f32; 4], // xyz = camera eye (fog distance reference), w unused
+    // F3 cascaded shadows: sun direction + 3 cascade light-view-proj matrices.
+    pub sun_dir: [f32; 4],
+    pub cascade_vp: [[f32; 4]; 4],   // cascade 0 (near)
+    pub cascade_vp1: [[f32; 4]; 4],  // cascade 1 (mid)
+    pub cascade_vp2: [[f32; 4]; 4],  // cascade 2 (far)
+    pub cascade_splits: [f32; 4],    // x,y,z = distance splits for cascade 0/1/2
 }
 
 /// Minimal perspective camera (matches voxel-render conventions for reuse of the math).
@@ -73,6 +79,36 @@ impl GpuCamera {
         let target = eye + fwd;
         let view = glam::Mat4::look_at_rh(eye, target, glam::Vec3::new(0.0, 1.0, 0.0));
         let proj = glam::Mat4::perspective_rh(self.fov_y, self.aspect, self.near, self.far);
+        let vp = proj * view;
+        vp.to_cols_array_2d()
+    }
+
+    /// F3 cascaded shadows: the sun direction matches `fs_main` in the WGSL (same formula),
+    /// so the shadow light view aligns with the diffuse term. `time_of_day` in [0,1].
+    pub fn sun_direction(time_of_day: f32) -> glam::Vec3 {
+        let phase = time_of_day * std::f32::consts::TAU;
+        let elev = (phase - std::f32::consts::FRAC_PI_2).sin();
+        glam::Vec3::new(
+            (phase).cos() * 0.5,
+            elev.max(0.04),
+            (phase).sin() * 0.5,
+        )
+        .normalize()
+    }
+
+    /// F3: orthographic light-view-projection for one shadow cascade, centered on the
+    /// camera eye, covering `radius` metres around it. Returns WebGPU clip-space (z in [0,1]).
+    pub fn sun_view_proj(&self, time_of_day: f32, radius: f32) -> [[f32; 4]; 4] {
+        let sun = Self::sun_direction(time_of_day);
+        let eye = glam::Vec3::new(self.eye[0], self.eye[1], self.eye[2]);
+        // Place the light "behind" the scene along the sun direction.
+        let light_eye = eye - sun * (radius * 2.0);
+        let center = eye;
+        let view = glam::Mat4::look_at_rh(light_eye, center, glam::Vec3::new(0.0, 1.0, 0.0));
+        // Orthographic cube covering [-radius, radius] around the center.
+        let proj = glam::Mat4::orthographic_rh(
+            -radius, radius, -radius, radius, 0.1, radius * 4.0 + 100.0,
+        );
         let vp = proj * view;
         vp.to_cols_array_2d()
     }
@@ -154,6 +190,18 @@ pub struct GpuScene {
     post_bg: wgpu::BindGroup,
     post_params_buf: wgpu::Buffer,
     post_sampler: wgpu::Sampler,
+    /// F3 cascaded shadows: depth-pass pipeline (writes pos to a depth map from the sun).
+    shadow_pipeline: wgpu::RenderPipeline,
+    /// Cascade shadow depth maps (cascade 0/1/2), sampled in the scene pass.
+    shadow_maps: [wgpu::TextureView; 3],
+    shadow_sampler: wgpu::Sampler,
+    shadow_bgl: wgpu::BindGroupLayout,
+    shadow_bg: wgpu::BindGroup,
+    shadow_vp_buf: wgpu::Buffer,
+    shadow_size: u32,
+    /// F3: separate BGL + bind group for the depth-only shadow pass (vp uniform only).
+    shadow_pass_bgl: wgpu::BindGroupLayout,
+    shadow_pass_bg: wgpu::BindGroup,
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
@@ -196,8 +244,87 @@ impl GpuScene {
         Ok((Arc::new(device), Arc::new(queue)))
     }
 
+    /// F3: bind group layout for the shadow resources read by the scene pass (group 2).
+    /// Sampled (not written) in the scene pass, so FRAGMENT visibility only.
+    fn build_shadow_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow-bgl"),
+            entries: &[
+                // Light-view-proj (one cascade at a time; rendered per cascade pass).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Comparison sampler for PCF.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                // Three cascade depth maps.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    /// F3: bind group layout for the depth-only shadow pass itself. Only the light-view-proj
+    /// uniform is needed (the vertex shader projects positions); the maps are written here,
+    /// not sampled, so they must NOT be bound (avoids a read/write usage conflict).
+    fn build_shadow_pass_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow-pass-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        })
+    }
+
     fn build_scene_pipeline(
         device: &wgpu::Device,
+        shadow_bgl: &wgpu::BindGroupLayout,
     ) -> (
         wgpu::RenderPipeline,
         wgpu::BindGroupLayout,
@@ -257,7 +384,7 @@ impl GpuScene {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("voxel-pipeline-layout"),
-            bind_group_layouts: &[Some(&bind_group_layout), Some(&material_bgl)],
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&material_bgl), Some(shadow_bgl)],
             immediate_size: 0,
         });
         let vbuf_layout = wgpu::VertexBufferLayout {
@@ -476,6 +603,154 @@ impl GpuScene {
         (bg, params_buf, sampler)
     }
 
+    /// F3 cascaded shadows: build the depth-only shadow pipeline (vertex-only, writes depth).
+    fn build_shadow_pipeline(
+        device: &wgpu::Device,
+        shadow_pass_bgl: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(SHADOW_WGSL)),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow-layout"),
+            bind_group_layouts: &[Some(shadow_pass_bgl)],
+            immediate_size: 0,
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_shadow"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                // Only the position attribute is needed for the depth pass.
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                })],
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Front),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
+    /// F3: three cascade shadow depth maps (Depth32Float), one per cascade level.
+    fn make_shadow_maps(device: &wgpu::Device, size: u32) -> [wgpu::TextureView; 3] {
+        let mk = |i: u32| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!("shadow-map-{i}")),
+                    size: wgpu::Extent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        [mk(0), mk(1), mk(2)]
+    }
+
+    /// F3: build the shadow bind groups. `sample_bg` (for the scene pass, group 2) binds the
+    /// vp uniform + comparison sampler + 3 cascade maps; `pass_bg` (for the depth-only shadow
+    /// pass) binds ONLY the vp uniform so the maps are written, not sampled (no usage conflict).
+    fn build_shadow_resources(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        shadow_bgl: &wgpu::BindGroupLayout,
+        shadow_pass_bgl: &wgpu::BindGroupLayout,
+        maps: &[wgpu::TextureView; 3],
+    ) -> (wgpu::BindGroup, wgpu::BindGroup, wgpu::Buffer, wgpu::Sampler) {
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            // Comparison sampler for hardware PCF (textureSampleCompare).
+            compare: Some(wgpu::CompareFunction::Less),
+            ..Default::default()
+        });
+        let vp_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadow-vp"),
+            size: std::mem::size_of::<[[f32; 4]; 4]>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let pass_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow-pass-bg"),
+            layout: shadow_pass_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &vp_buf,
+                    offset: 0,
+                    size: None,
+                }),
+            }],
+        });
+        let sample_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow-bg"),
+            layout: shadow_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &vp_buf,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&maps[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&maps[1]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&maps[2]),
+                },
+            ],
+        });
+        (sample_bg, pass_bg, vp_buf, sampler)
+    }
+
     fn make_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
         device
             .create_texture(&wgpu::TextureDescriptor {
@@ -650,13 +925,22 @@ impl GpuScene {
         let (device, queue) = Self::bootstrap().await?;
         let format = wgpu::TextureFormat::Rgba8Unorm;
         // Scene pass renders to HDR; post pass writes to the offscreen (PNG) format.
-        let (pipeline, bind_group_layout, material_bgl) = Self::build_scene_pipeline(&device);
+        let shadow_bgl = Self::build_shadow_bgl(&device);
+        let (pipeline, bind_group_layout, material_bgl) =
+            Self::build_scene_pipeline(&device, &shadow_bgl);
         let (post_pipeline, post_bgl) = Self::build_post_pipeline(&device, format);
         let material_bg = Self::build_material_resources(&device, &queue, &material_bgl);
         let depth_view = Self::make_depth(&device, width, height);
         let hdr_view = Self::make_hdr_target(&device, width, height);
         let (post_bg, post_params_buf, post_sampler) =
             Self::build_post_resources(&device, &queue, &post_bgl, &hdr_view);
+        // F3 cascaded shadows.
+        let shadow_size = 2048;
+        let shadow_pass_bgl = Self::build_shadow_pass_bgl(&device);
+        let shadow_pipeline = Self::build_shadow_pipeline(&device, &shadow_pass_bgl);
+        let shadow_maps = Self::make_shadow_maps(&device, shadow_size);
+        let (shadow_bg, shadow_pass_bg, shadow_vp_buf, shadow_sampler) =
+            Self::build_shadow_resources(&device, &queue, &shadow_bgl, &shadow_pass_bgl, &shadow_maps);
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera-uniform"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -677,6 +961,15 @@ impl GpuScene {
             post_bg,
             post_params_buf,
             post_sampler,
+            shadow_pipeline,
+            shadow_maps,
+            shadow_sampler,
+            shadow_bgl: shadow_bgl.clone(),
+            shadow_bg,
+            shadow_pass_bgl: shadow_pass_bgl.clone(),
+            shadow_pass_bg,
+            shadow_vp_buf,
+            shadow_size,
             width,
             height,
             format,
@@ -725,13 +1018,22 @@ impl GpuScene {
         height: u32,
         format: wgpu::TextureFormat,
     ) -> anyhow::Result<Self> {
-        let (pipeline, bind_group_layout, material_bgl) = Self::build_scene_pipeline(&device);
+        let shadow_bgl = Self::build_shadow_bgl(&device);
+        let (pipeline, bind_group_layout, material_bgl) =
+            Self::build_scene_pipeline(&device, &shadow_bgl);
         let (post_pipeline, post_bgl) = Self::build_post_pipeline(&device, format);
         let material_bg = Self::build_material_resources(&device, &queue, &material_bgl);
         let depth_view = Self::make_depth(&device, width, height);
         let hdr_view = Self::make_hdr_target(&device, width, height);
         let (post_bg, post_params_buf, post_sampler) =
             Self::build_post_resources(&device, &queue, &post_bgl, &hdr_view);
+        // F3 cascaded shadows.
+        let shadow_size = 2048;
+        let shadow_pass_bgl = Self::build_shadow_pass_bgl(&device);
+        let shadow_pipeline = Self::build_shadow_pipeline(&device, &shadow_pass_bgl);
+        let shadow_maps = Self::make_shadow_maps(&device, shadow_size);
+        let (shadow_bg, shadow_pass_bg, shadow_vp_buf, shadow_sampler) =
+            Self::build_shadow_resources(&device, &queue, &shadow_bgl, &shadow_pass_bgl, &shadow_maps);
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera-uniform"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -752,6 +1054,15 @@ impl GpuScene {
             post_bg,
             post_params_buf,
             post_sampler,
+            shadow_pipeline,
+            shadow_maps,
+            shadow_sampler,
+            shadow_bgl: shadow_bgl.clone(),
+            shadow_bg,
+            shadow_pass_bgl: shadow_pass_bgl.clone(),
+            shadow_pass_bg,
+            shadow_vp_buf,
+            shadow_size,
             width,
             height,
             format,
@@ -760,16 +1071,12 @@ impl GpuScene {
         })
     }
 
-    /// Upload vertices + camera, run the render pass into `target_view`, then return the
-    /// vertex buffer handle (kept alive by the caller for the duration of the pass).
-    fn record_pass<'a>(
-        &'a mut self,
-        encoder: &'a mut wgpu::CommandEncoder,
+    /// Upload voxel triangles to the pooled VBO and return the buffer + vertex count.
+    /// The shadow pass and scene pass both consume this buffer.
+    fn upload_vertices(
+        &mut self,
         tris: &[Triangle],
-        camera: &GpuCamera,
-        target_view: &'a wgpu::TextureView,
-        time_of_day: f32,
-    ) -> anyhow::Result<wgpu::Buffer> {
+    ) -> anyhow::Result<(wgpu::Buffer, usize)> {
         let mut verts: Vec<GpuVertex> = Vec::with_capacity(tris.len() * 3);
         for t in tris {
             for v in [&t.a, &t.b, &t.c] {
@@ -826,12 +1133,39 @@ impl GpuScene {
         }
         self.queue
             .write_buffer(&vbuf, 0, bytemuck::cast_slice(&verts));
+        Ok((vbuf, verts.len()))
+    }
 
+    /// F3: render the voxel scene into `target_view` (HDR), sampling the cascade shadow maps.
+    /// Camera uniform (with cascade light-view-projections) is written here so the shadow
+    /// pass has already populated the maps this frame.
+    fn scene_pass(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        vbuf: &wgpu::Buffer,
+        vert_count: usize,
+        camera: &GpuCamera,
+        target_view: &wgpu::TextureView,
+        time_of_day: f32,
+    ) -> anyhow::Result<()> {
+        if vert_count == 0 {
+            anyhow::bail!("no triangles to render");
+        }
+        let sun = GpuCamera::sun_direction(time_of_day);
+        let cascade_radii = [40.0_f32, 160.0, 640.0];
+        let cvp0 = camera.sun_view_proj(time_of_day, cascade_radii[0]);
+        let cvp1 = camera.sun_view_proj(time_of_day, cascade_radii[1]);
+        let cvp2 = camera.sun_view_proj(time_of_day, cascade_radii[2]);
         let cu = CameraUniform {
             view_proj: camera.view_proj(),
             fog_color: [0.62, 0.66, 0.74, 1.0],
             params: [0.012, time_of_day, 0.0, 0.0],
             eye_pos: [camera.eye[0], camera.eye[1], camera.eye[2], 0.0],
+            sun_dir: [sun.x, sun.y, sun.z, 0.0],
+            cascade_vp: cvp0,
+            cascade_vp1: cvp1,
+            cascade_vp2: cvp2,
+            cascade_splits: [cascade_radii[0], cascade_radii[1], cascade_radii[2], 0.0],
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&[cu]));
@@ -881,10 +1215,11 @@ impl GpuScene {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_bind_group(1, &self.material_bg, &[]);
+            pass.set_bind_group(2, &self.shadow_bg, &[]);
             pass.set_vertex_buffer(0, vbuf.slice(..));
-            pass.draw(0..verts.len() as u32, 0..1);
+            pass.draw(0..vert_count as u32, 0..1);
         }
-        Ok(vbuf)
+        Ok(())
     }
 
     /// Render triangles to a PNG file (offscreen path — unchanged behaviour from S-10).
@@ -917,7 +1252,9 @@ impl GpuScene {
             });
         // Scene pass -> HDR target, then filmic post pass -> offscreen PNG target.
         let hdr = self.hdr_view.clone();
-        self.record_pass(&mut encoder, tris, camera, &hdr, 0.3)?;
+        let (vbuf, vc) = self.upload_vertices(tris)?;
+        self.shadow_pass(&mut encoder, &vbuf, vc as u32, camera, 0.3);
+        self.scene_pass(&mut encoder, &vbuf, vc, camera, &hdr, 0.3)?;
         self.post_pass(&mut encoder, &target_view);
         self.queue.submit(Some(encoder.finish()));
 
@@ -1002,7 +1339,9 @@ impl GpuScene {
             });
         // Scene pass -> HDR target.
         let hdr = self.hdr_view.clone();
-        self.record_pass(&mut encoder, tris, camera, &hdr, time_of_day)?;
+        let (vbuf, vc) = self.upload_vertices(tris)?;
+        self.shadow_pass(&mut encoder, &vbuf, vc as u32, camera, time_of_day);
+        self.scene_pass(&mut encoder, &vbuf, vc, camera, &hdr, time_of_day)?;
         // Post pass HDR -> surface (filmic tonemap + grade).
         self.post_pass(&mut encoder, surface_view);
         self.queue.submit(Some(encoder.finish()));
@@ -1034,6 +1373,43 @@ impl GpuScene {
         pass.set_pipeline(&self.post_pipeline);
         pass.set_bind_group(0, &self.post_bg, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// F3 cascaded shadows: render the scene depth into the 3 cascade shadow maps from the
+    /// sun. Reuses the already-uploaded vertex buffer (shadow pipeline only reads `pos`).
+    fn shadow_pass(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        vbuf: &wgpu::Buffer,
+        vert_count: u32,
+        camera: &GpuCamera,
+        time_of_day: f32,
+    ) {
+        let radii = [40.0_f32, 160.0, 640.0];
+        for c in 0..3 {
+            let vp = camera.sun_view_proj(time_of_day, radii[c]);
+            self.queue
+                .write_buffer(&self.shadow_vp_buf, 0, bytemuck::cast_slice(&[vp]));
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(&format!("shadow-pass-{c}")),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_maps[c],
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0_f32),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.shadow_pass_bg, &[]);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..vert_count, 0..1);
+        }
     }
 
     pub fn format(&self) -> wgpu::TextureFormat {
@@ -1072,7 +1448,9 @@ impl GpuScene {
             });
         // Scene pass -> HDR, then filmic post pass -> bench target.
         let hdr = self.hdr_view.clone();
-        self.record_pass(&mut encoder, tris, camera, &hdr, 0.3)?;
+        let (vbuf, vc) = self.upload_vertices(tris)?;
+        self.shadow_pass(&mut encoder, &vbuf, vc as u32, camera, 0.3);
+        self.scene_pass(&mut encoder, &vbuf, vc, camera, &hdr, 0.3)?;
         self.post_pass(&mut encoder, &target_view);
         self.queue.submit(Some(encoder.finish()));
         // Block until the GPU has actually executed the submitted work. This is the
@@ -1354,10 +1732,25 @@ const VOXEL_WGSL: &str = r#"
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     fog_color: vec4<f32>,
-    params: vec4<f32>,
-    eye_pos: vec4<f32>,
+    params: vec4<f32>,   // x = fog_density, y = time_of_day
+    eye_pos: vec4<f32>,  // xyz = camera eye
+    sun_dir: vec4<f32>,
+    cascade_vp: mat4x4<f32>,
+    cascade_vp1: mat4x4<f32>,
+    cascade_vp2: mat4x4<f32>,
+    cascade_splits: vec4<f32>, // x,y,z = distance splits for cascade 0/1/2
 };
 @group(0) @binding(0) var<uniform> cam: CameraUniform;
+
+// F3 cascaded shadows: read the cascade depth maps from the sun.
+struct ShadowCam {
+    vp: mat4x4<f32>,
+};
+@group(2) @binding(0) var<uniform> shadow_cam: ShadowCam;
+@group(2) @binding(1) var shadow_samp: sampler_comparison;
+@group(2) @binding(2) var shadow_map0: texture_depth_2d;
+@group(2) @binding(3) var shadow_map1: texture_depth_2d;
+@group(2) @binding(4) var shadow_map2: texture_depth_2d;
 
 // Mijlpaal 4 P0: per-material PBR params, indexed by the flat material id.
 struct MaterialPbr {
@@ -1472,7 +1865,34 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     let ambient = mix(0.10, 0.38, day);            // donkerder 's nachts
     // Zachte key-light voor vorm, geen harde schaduwranden.
     let L = sun_dir;
-    let diff = max(dot(n, L), 0.0) * day;
+    // F3 cascaded shadows: sample the sun depth map for this fragment's cascade.
+    let dist = length(in.world_pos - cam.eye_pos.xyz);
+    var shadow = 1.0;
+    var cascade_vp = cam.cascade_vp;
+    if (dist > cam.cascade_splits.y) {
+        cascade_vp = cam.cascade_vp2;
+    } else if (dist > cam.cascade_splits.x) {
+        cascade_vp = cam.cascade_vp1;
+    }
+    let lp = cascade_vp * vec4<f32>(in.world_pos, 1.0);
+    if (lp.w > 0.0) {
+        let luv = lp.xyz / lp.w;            // NDC -1..1
+        let uv = vec2<f32>(luv.x * 0.5 + 0.5, 0.5 - luv.y * 0.5);
+        if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
+            let frag_depth = luv.z;         // already 0..1 (ortho, WebGPU clip)
+            // Choose the right cascade map to sample.
+            var s = 1.0;
+            if (dist > cam.cascade_splits.y) {
+                s = textureSampleCompare(shadow_map2, shadow_samp, uv, frag_depth - 0.0015);
+            } else if (dist > cam.cascade_splits.x) {
+                s = textureSampleCompare(shadow_map1, shadow_samp, uv, frag_depth - 0.0015);
+            } else {
+                s = textureSampleCompare(shadow_map0, shadow_samp, uv, frag_depth - 0.0015);
+            }
+            shadow = s;
+        }
+    }
+    let diff = max(dot(n, L), 0.0) * day * shadow;
     // Per-vertex AO (F5, baked in the mesher) darkens crevices/contact shadows; the
     // fragment AO is the average of the 3 corner values. Keep the cheap value-noise ONLY
     // as subtle per-voxel brightness jitter (breaks the 'plastic' look), not as AO.
@@ -1490,7 +1910,6 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     var col = albedo * (hemi * (ambient + 0.55) * sun + vec3<f32>(1.0, 0.96, 0.88) * 0.35 * diff) * ao;
     col += m.emissive.rgb * day;
 
-    let dist = length(in.world_pos - cam.eye_pos.xyz);
     let fog = 1.0 - exp(-cam.params.x * dist);
     // Fog-kleur volgt de lucht (warm bij schemering, koel bij dag, donker bij nacht).
     let fog_col = mix(bg_sky, vec3<f32>(0.10, 0.12, 0.20), (1.0 - day) * 0.6);
@@ -1557,5 +1976,25 @@ fn fs_post(in: VOut) -> @location(0) vec4<f32> {
     let g = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
     col = mix(vec3<f32>(g), col, pp.saturation);
     return vec4<f32>(col, 1.0);
+}
+"#;
+
+/// F3 cascaded shadows: depth-only pass. Projects each vertex by a cascade light-view-proj
+/// and writes depth into a depth texture. No colour output.
+const SHADOW_WGSL: &str = r#"
+struct ShadowCam {
+    vp: mat4x4<f32>,
+};
+@group(0) @binding(0) var<uniform> sc: ShadowCam;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+};
+
+@vertex
+fn vs_shadow(@location(0) in_pos: vec3<f32>) -> VOut {
+    var o: VOut;
+    o.pos = sc.vp * vec4<f32>(in_pos, 1.0);
+    return o;
 }
 "#;
