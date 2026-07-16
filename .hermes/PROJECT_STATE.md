@@ -262,6 +262,40 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       `[-sp,0,cp]` → echte strafe. (3)+(4) volgden uit (1): groene surface + correcte TRIS
       nu zichtbaar zodra de eye boven de grond zit. Release gpu_window_main herbouwd.
 
+27t. ✅ **F1 POST-FX — filmische post-processing (2026-07-16, autonoom onder Genesis OS v2.3):**
+      Scene-pass rendert nu naar een **lineaire HDR-target (rgba16float)** i.p.v. direct naar de
+      surface. Een fullscreen **post-pass** leest die HDR en doet: exposure × ACES filmic tonemap
+      (Narkowicz) + teal-orange split-tone grade + saturatie → surface. Filmic look in de stijl
+      van Lay of the Land / Crimson Desert. WGSL `POST_WGSL` (vs_post/fs_post fullscreen triangle);
+      Rust: `GpuScene` krijgt `hdr_view` + `post_pipeline`/`post_bgl`/`post_bg`/`post_params_buf`;
+      `build_scene_pipeline` target=Rgba16Float, nieuw `build_post_pipeline`/`make_hdr_target`/
+      `build_post_resources`; `render_to_view`/`render_triangles_png`/`render_triangles` route
+      scene→HDR→post. wgpu 0.30 gotcha's: `bind_group_layouts: &[Some(&bgl)]`, `immediate_size: 0`
+      (geen `push_constant_ranges`), hdr_view gecloned vóór `&mut self` record_pass-call.
+      **Geverifieerd:** voxel-gpu build groen; 30/30 lib-tests (PNG-oracle loopt nu HDR→post→PNG);
+      client_smoke --release 120/120 frames no panic; throughput_baseline --release groen.
+      (Debug-build throughput faalt op gen+mesh 53,9 ms/chunk <25 eis — pre-existing debug-profile
+      artifact, release haalt de drempel; post-pass raakt gen/mesh niet, voegt <1 ms render toe.)
+      OPEN GATE: de filmische look (exposure 1.1 / sat 1.15 / grade 0.6) is onbeoordeeld in live
+      beeld — user hoeft niet te kiezen, maar kan de intensiteit laten bijstellen.
+
+27u. ✅ **TRACY PROFILER-INTEGRATIE (2026-07-16, autonoom):** real-time frame-profiler achter
+      `--features tracy`. `tracy-client` 0.18.4 + `tracy-client-sys` 0.28.0 (=Tracy v0.13.1,
+      protocol-match met de GUI). Zones: `frame` (RedrawRequested) + `gpu_submit` (queue.submit) +
+      worker `worker_gen`/`worker_mesh` (cross-crate in voxel-gpu). Plots: fps/chunks/tris.
+      cfg-gated macro's (`span!`/`plot!`/`frame_mark!`) — no-op zonder feature. Autonome
+      perf-telemetry: `profile_metrics.log` (1 sample/sec: fps, chunks, tris) die Hermes zelf
+      leest; `profile-voxel-engine.bat` op Desktop (dubbelklik = Tracy-client build+launch).
+      Geen technische vragen aan user: Tracy 100% onder Hermes-regie.
+
+27v. ✅ **GENESIS OS v2.3 CONSTITUTIE (2026-07-16):** user delegeerde 110% autonomie + leverde
+      "Micro-Voxel Genesis OS v2.3" (autonome engineering-grondwet) als PDF. Kern: één taak / één
+      packet / één evidence-checkpoint; model stelt voor, alleen een deterministische verifier
+      promoveert naar ACCEPTED; waarheidseisen (geen "klaar" zonder artifact); AAA/MMO-claims pas
+      na hun milestone-gate. Geïmplementeerd als werkwijze: zero-questions modus, Nederlandse
+      milestone-verslagen, TDD + pixel-oracle-verificatie, commit/push per milestone.
+      Nieuwe skill `genesis-autonomous-engineering` + `tracy-profiling-integration` aangemaakt.
+
 ## Auditwaarschuwing
 
 ## Actieve automatisering

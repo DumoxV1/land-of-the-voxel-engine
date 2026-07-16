@@ -146,6 +146,14 @@ pub struct GpuScene {
     material_bg: wgpu::BindGroup,
     camera_buf: wgpu::Buffer,
     depth_view: wgpu::TextureView,
+    /// F1 post-FX: linear HDR scene target (rgba16float) the voxel pass renders into.
+    hdr_view: wgpu::TextureView,
+    /// F1 post-FX: fullscreen filmic pass pipeline (targets the surface/present format).
+    post_pipeline: wgpu::RenderPipeline,
+    post_bgl: wgpu::BindGroupLayout,
+    post_bg: wgpu::BindGroup,
+    post_params_buf: wgpu::Buffer,
+    post_sampler: wgpu::Sampler,
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
@@ -188,14 +196,16 @@ impl GpuScene {
         Ok((Arc::new(device), Arc::new(queue)))
     }
 
-    fn build_pipeline(
+    fn build_scene_pipeline(
         device: &wgpu::Device,
-        format: wgpu::TextureFormat,
     ) -> (
         wgpu::RenderPipeline,
         wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
     ) {
+        // Scene pass always renders to a linear HDR target (rgba16float) so the
+        // post-FX pass (F1) can tonemap >1 highlights. Surface encoding happens later.
+        let format = wgpu::TextureFormat::Rgba16Float;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("voxel-shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(VOXEL_WGSL)),
@@ -317,6 +327,153 @@ impl GpuScene {
             cache: None,
         });
         (pipeline, bind_group_layout, material_bgl)
+    }
+
+    /// F1 post-FX: build the fullscreen filmic pass pipeline. Targets `surface_format`
+    /// (the swapchain/present format); reads the linear HDR scene target.
+    fn build_post_pipeline(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+    ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("post-fx-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(POST_WGSL)),
+        });
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("post-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("post-layout"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("post-fx-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_post"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_post"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        (pipeline, bgl)
+    }
+
+    /// Linear HDR scene target (rgba16float), reused across frames.
+    fn make_hdr_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("hdr-target"),
+                size: wgpu::Extent3d {
+                    width: width.max(1),
+                    height: height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// Build the post-FX bind group (HDR texture view + sampler + params) for the
+    /// given HDR target view. Rebuilt on resize since it references the HDR view.
+    fn build_post_resources(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        post_bgl: &wgpu::BindGroupLayout,
+        hdr_view: &wgpu::TextureView,
+    ) -> (wgpu::BindGroup, wgpu::Buffer, wgpu::Sampler) {
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("post-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("post-params"),
+            size: std::mem::size_of::<[f32; 4]>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Filmic defaults: exposure 1.1, saturation 1.15, teal-orange grade 0.6.
+        queue.write_buffer(
+            &params_buf,
+            0,
+            bytemuck::cast_slice(&[1.1_f32, 1.15_f32, 0.6_f32, 0.0_f32]),
+        );
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("post-bg"),
+            layout: post_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(hdr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &params_buf,
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+        });
+        (bg, params_buf, sampler)
     }
 
     fn make_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
@@ -492,9 +649,14 @@ impl GpuScene {
     pub async fn new_offscreen(width: u32, height: u32) -> anyhow::Result<Self> {
         let (device, queue) = Self::bootstrap().await?;
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let (pipeline, bind_group_layout, material_bgl) = Self::build_pipeline(&device, format);
+        // Scene pass renders to HDR; post pass writes to the offscreen (PNG) format.
+        let (pipeline, bind_group_layout, material_bgl) = Self::build_scene_pipeline(&device);
+        let (post_pipeline, post_bgl) = Self::build_post_pipeline(&device, format);
         let material_bg = Self::build_material_resources(&device, &queue, &material_bgl);
         let depth_view = Self::make_depth(&device, width, height);
+        let hdr_view = Self::make_hdr_target(&device, width, height);
+        let (post_bg, post_params_buf, post_sampler) =
+            Self::build_post_resources(&device, &queue, &post_bgl, &hdr_view);
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera-uniform"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -509,6 +671,12 @@ impl GpuScene {
             material_bg,
             camera_buf,
             depth_view,
+            hdr_view,
+            post_pipeline,
+            post_bgl,
+            post_bg,
+            post_params_buf,
+            post_sampler,
             width,
             height,
             format,
@@ -531,6 +699,16 @@ impl GpuScene {
         self.width = width.max(1);
         self.height = height.max(1);
         self.depth_view = Self::make_depth(&self.device, self.width, self.height);
+        self.hdr_view = Self::make_hdr_target(&self.device, self.width, self.height);
+        let (post_bg, post_params_buf, post_sampler) = Self::build_post_resources(
+            &self.device,
+            &self.queue,
+            &self.post_bgl,
+            &self.hdr_view,
+        );
+        self.post_bg = post_bg;
+        self.post_params_buf = post_params_buf;
+        self.post_sampler = post_sampler;
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -547,9 +725,13 @@ impl GpuScene {
         height: u32,
         format: wgpu::TextureFormat,
     ) -> anyhow::Result<Self> {
-        let (pipeline, bind_group_layout, material_bgl) = Self::build_pipeline(&device, format);
+        let (pipeline, bind_group_layout, material_bgl) = Self::build_scene_pipeline(&device);
+        let (post_pipeline, post_bgl) = Self::build_post_pipeline(&device, format);
         let material_bg = Self::build_material_resources(&device, &queue, &material_bgl);
         let depth_view = Self::make_depth(&device, width, height);
+        let hdr_view = Self::make_hdr_target(&device, width, height);
+        let (post_bg, post_params_buf, post_sampler) =
+            Self::build_post_resources(&device, &queue, &post_bgl, &hdr_view);
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera-uniform"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -564,6 +746,12 @@ impl GpuScene {
             material_bg,
             camera_buf,
             depth_view,
+            hdr_view,
+            post_pipeline,
+            post_bgl,
+            post_bg,
+            post_params_buf,
+            post_sampler,
             width,
             height,
             format,
@@ -727,7 +915,10 @@ impl GpuScene {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("voxel-enc"),
             });
-        self.record_pass(&mut encoder, tris, camera, &target_view, 0.3)?;
+        // Scene pass -> HDR target, then filmic post pass -> offscreen PNG target.
+        let hdr = self.hdr_view.clone();
+        self.record_pass(&mut encoder, tris, camera, &hdr, 0.3)?;
+        self.post_pass(&mut encoder, &target_view);
         self.queue.submit(Some(encoder.finish()));
 
         // Read back.
@@ -809,9 +1000,40 @@ impl GpuScene {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("voxel-window-enc"),
             });
-        self.record_pass(&mut encoder, tris, camera, surface_view, time_of_day)?;
+        // Scene pass -> HDR target.
+        let hdr = self.hdr_view.clone();
+        self.record_pass(&mut encoder, tris, camera, &hdr, time_of_day)?;
+        // Post pass HDR -> surface (filmic tonemap + grade).
+        self.post_pass(&mut encoder, surface_view);
         self.queue.submit(Some(encoder.finish()));
         Ok(())
+    }
+
+    /// Fullscreen filmic post-FX pass: HDR target -> `target_view` (surface or offscreen).
+    fn post_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("post-fx-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.post_pipeline);
+        pass.set_bind_group(0, &self.post_bg, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     pub fn format(&self) -> wgpu::TextureFormat {
@@ -848,7 +1070,10 @@ impl GpuScene {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("bench-enc"),
             });
-        self.record_pass(&mut encoder, tris, camera, &target_view, 0.3)?;
+        // Scene pass -> HDR, then filmic post pass -> bench target.
+        let hdr = self.hdr_view.clone();
+        self.record_pass(&mut encoder, tris, camera, &hdr, 0.3)?;
+        self.post_pass(&mut encoder, &target_view);
         self.queue.submit(Some(encoder.finish()));
         // Block until the GPU has actually executed the submitted work. This is the
         // frame's real cost proxy (no surface present, no readback).
@@ -1270,6 +1495,67 @@ fn fs_main(in: VtxOut) -> @location(0) vec4<f32> {
     // Fog-kleur volgt de lucht (warm bij schemering, koel bij dag, donker bij nacht).
     let fog_col = mix(bg_sky, vec3<f32>(0.10, 0.12, 0.20), (1.0 - day) * 0.6);
     col = mix(col, fog_col, clamp(fog, 0.0, 0.85));
+    return vec4<f32>(col, 1.0);
+}
+"#;
+
+/// F1 post-FX: fullscreen filmic pass. Reads the linear HDR scene target and
+/// applies exposure + ACES tonemap + teal-orange grade + saturation, writing
+/// display-ready linear colour into the surface (srgb-encoded by the present).
+const POST_WGSL: &str = r#"
+struct PostParams {
+    exposure: f32,
+    saturation: f32,
+    grade: f32,
+    _pad: f32,
+};
+@group(0) @binding(0) var hdr_tex: texture_2d<f32>;
+@group(0) @binding(1) var hdr_sampler: sampler;
+@group(0) @binding(2) var<uniform> pp: PostParams;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_post(@builtin(vertex_index) vi: u32) -> VOut {
+    // Fullscreen triangle (covers the viewport with one primitive).
+    var p = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    var o: VOut;
+    o.pos = vec4<f32>(p[vi], 0.0, 1.0);
+    var uv = p[vi] * 0.5 + vec2<f32>(0.5, 0.5);
+    uv.y = 1.0 - uv.y;
+    o.uv = uv;
+    return o;
+}
+
+// ACES filmic tonemap (Narkowicz approximation) — smooth highlight rolloff.
+fn aces(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+@fragment
+fn fs_post(in: VOut) -> @location(0) vec4<f32> {
+    var hdr = textureSample(hdr_tex, hdr_sampler, in.uv).rgb;
+    hdr = hdr * pp.exposure;
+    var col = aces(hdr);
+    // Teal-orange split-tone: shadows cool, highlights warm (filmic look).
+    let l = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let tint = mix(vec3<f32>(0.85, 1.05, 1.15), vec3<f32>(1.12, 0.95, 0.75), l);
+    col = col * mix(vec3<f32>(1.0), tint, pp.grade * 0.5);
+    // Saturation around luma.
+    let g = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+    col = mix(vec3<f32>(g), col, pp.saturation);
     return vec4<f32>(col, 1.0);
 }
 "#;
