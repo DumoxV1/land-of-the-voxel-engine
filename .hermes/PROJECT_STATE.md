@@ -315,7 +315,7 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       de streamed range → oceanen in valleien onzichtbaar. Fix: `hi = max(surface+overhang,
       sea_level_vox)`. Nieuwe test `sub_sea_level_columns_stream_water_to_sea_level` + aangepaste
       tightness-test (sub-sea kolommen dragen water, niet terrain). Her-audit: **SAFE TO SHIP**.
-      Verificatie: worldgen 17/17, gpu 31/31, client_smoke 120/120. Gepusht als `e2e1c4f`.
+      Verificatie: worldgen 17/17, gpu 31/31, client_smoke 120/120. Gepusht als `e63616a`.
       **Les (pipeline):** de audit-pijplijn ving een bug die tests + shader-groen misten — de
       onafhankelijke reviewer is niet optioneel.
 
