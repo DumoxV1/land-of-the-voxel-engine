@@ -306,6 +306,19 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       OPEN GATE: de filmische look (exposure 1.1 / sat 1.15 / grade 0.6) is onbeoordeeld in live
       beeld — user hoeft niet te kiezen, maar kan de intensiteit laten bijstellen.
 
+27w. ✅ **F4 WERELD-WATER + AUDIT-FIX (2026-07-17, autonoom onder nieuwe pipeline):** de F4
+      shader (27v) tekende water, maar de **wereld genereerde nog géén water-voxels** → oceaan
+      onzichtbaar in de client. Toegevoegd: `WATER = 9` + `SEA_LEVEL_M = 180 m` (≈38% van
+      MAX_SURFACE_M); `generate_chunk` vult air-voxels onder zeeniveau (boven surface én in caves)
+      met materiaal 9. **Onafhankelijke audit** (leaf-subagent) vond een stille BUG:
+      `column_solid_cy_range` reikte niet tot zeeniveau → water-chunks (cy 26..44) vielen buiten
+      de streamed range → oceanen in valleien onzichtbaar. Fix: `hi = max(surface+overhang,
+      sea_level_vox)`. Nieuwe test `sub_sea_level_columns_stream_water_to_sea_level` + aangepaste
+      tightness-test (sub-sea kolommen dragen water, niet terrain). Her-audit: **SAFE TO SHIP**.
+      Verificatie: worldgen 17/17, gpu 31/31, client_smoke 120/120. Gepusht als `e2e1c4f`.
+      **Les (pipeline):** de audit-pijplijn ving een bug die tests + shader-groen misten — de
+      onafhankelijke reviewer is niet optioneel.
+
 27u. ✅ **TRACY PROFILER-INTEGRATIE (2026-07-16, autonoom):** real-time frame-profiler achter
       `--features tracy`. `tracy-client` 0.18.4 + `tracy-client-sys` 0.28.0 (=Tracy v0.13.1,
       protocol-match met de GUI). Zones: `frame` (RedrawRequested) + `gpu_submit` (queue.submit) +
