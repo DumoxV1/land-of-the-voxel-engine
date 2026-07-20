@@ -342,6 +342,16 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       `spike_i2_save_load` (save→reload→assert) 1/1 groen. Verificatie: client 3+1, worldgen 17/17,
       gpu 31/31, smoke 120/120. Gepusht als `c8d87ea`.
 
+27z. ✅ **F6 CLOUDS (2026-07-20, autonoom onder nieuwe pipeline):** procedurele wolken aan de hemel.
+      Nieuwe fullscreen **sky-pass** (`SKY_WGSL` + `sky_pass` + `build_sky_pipeline`) die vóór de
+      scene-pass draait en de oude effen frame-clear vervangt. WGSL: FBM-noise (hash/fbm) op de
+      view-ray → wolk-dekking × wolk-kleur, gemengd in de bestaande F2 sky-gradient met golden-hour
+      warmte. Root-cause bug gefixed: ray-unprojection gebruikte `view_proj*vec4(ndc,1,1)` (effen
+      sky, std-dev=0) → nu `inv_view_proj` (Rust `GpuCamera::inv_view_proj`, glam-matrix-inverse).
+      Pixel-oracle `sky_has_clouds` (std-dev luminantie >4 in bovenste band) groen (10.27).
+      Onafhankelijke audit **SAFE TO SHIP** (6/6 aspecten). Verificatie: gpu 32/32, worldgen 17/17,
+      client 3/3, smoke 120/120. Gepusht als `<TBD>`.
+
 27u. ✅ **TRACY PROFILER-INTEGRATIE (2026-07-16, autonoom):** real-time frame-profiler achter
       `--features tracy`. `tracy-client` 0.18.4 + `tracy-client-sys` 0.28.0 (=Tracy v0.13.1,
       protocol-match met de GUI). Zones: `frame` (RedrawRequested) + `gpu_submit` (queue.submit) +

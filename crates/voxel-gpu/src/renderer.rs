@@ -44,6 +44,9 @@ pub struct CameraUniform {
     pub cascade_vp1: [[f32; 4]; 4],  // cascade 1 (mid)
     pub cascade_vp2: [[f32; 4]; 4],  // cascade 2 (far)
     pub cascade_splits: [f32; 4],    // x,y,z = distance splits for cascade 0/1/2
+    /// F6 clouds: inverse view-proj, used by the sky shader to unproject screen UVs into
+    /// world-space view rays (so procedural clouds track the camera look direction).
+    pub inv_view_proj: [[f32; 4]; 4],
 }
 
 /// Minimal perspective camera (matches voxel-render conventions for reuse of the math).
@@ -81,6 +84,19 @@ impl GpuCamera {
         let proj = glam::Mat4::perspective_rh(self.fov_y, self.aspect, self.near, self.far);
         let vp = proj * view;
         vp.to_cols_array_2d()
+    }
+
+    /// F6 clouds: inverse view-proj, used by the sky shader to unproject screen rays.
+    pub fn inv_view_proj(&self) -> [[f32; 4]; 4] {
+        let eye = glam::Vec3::new(self.eye[0], self.eye[1], self.eye[2]);
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        let fwd = glam::Vec3::new(cy * cp, sp, sy * cp);
+        let target = eye + fwd;
+        let view = glam::Mat4::look_at_rh(eye, target, glam::Vec3::new(0.0, 1.0, 0.0));
+        let proj = glam::Mat4::perspective_rh(self.fov_y, self.aspect, self.near, self.far);
+        let vp = proj * view;
+        vp.inverse().to_cols_array_2d()
     }
 
     /// F3 cascaded shadows: the sun direction matches `fs_main` in the WGSL (same formula),
@@ -203,6 +219,9 @@ pub struct GpuScene {
     /// F3: separate BGL + bind group for the depth-only shadow pass (vp uniform only).
     shadow_pass_bgl: wgpu::BindGroupLayout,
     shadow_pass_bg: wgpu::BindGroup,
+    /// F6 clouds: fullscreen sky pass (drawn before the voxel scene as the background).
+    sky_pipeline: wgpu::RenderPipeline,
+    sky_bg: wgpu::BindGroup,
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
@@ -671,6 +690,95 @@ impl GpuScene {
         })
     }
 
+    /// F6 clouds: build the fullscreen sky pass pipeline (camera uniform only, no depth).
+    /// Renders into the linear HDR target so the post-FX pass tonemaps it consistently.
+    fn build_sky_pipeline(
+        device: &wgpu::Device,
+        camera_bgl: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sky-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(SKY_WGSL)),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky-layout"),
+            bind_group_layouts: &[Some(camera_bgl)],
+            immediate_size: 0,
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_sky"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_sky"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
+    /// F6 clouds: draw the fullscreen sky (with procedural clouds) into the HDR target.
+    /// Used as the background before the voxel scene is composited on top.
+    fn sky_pass(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        camera: &GpuCamera,
+        time_of_day: f32,
+    ) {
+        // The sky shader reads the camera uniform (eye, view_proj, time_of_day), so write
+        // it here before drawing — the scene pass will overwrite it again later (harmless).
+        let sun = GpuCamera::sun_direction(time_of_day);
+        let cu = CameraUniform {
+            view_proj: camera.view_proj(),
+            fog_color: [0.62, 0.66, 0.74, 1.0],
+            params: [0.012, time_of_day, 0.0, 0.0],
+            eye_pos: [camera.eye[0], camera.eye[1], camera.eye[2], 0.0],
+            sun_dir: [sun.x, sun.y, sun.z, 0.0],
+            cascade_vp: [[0.0; 4]; 4],
+            cascade_vp1: [[0.0; 4]; 4],
+            cascade_vp2: [[0.0; 4]; 4],
+            cascade_splits: [0.0, 0.0, 0.0, 0.0],
+            inv_view_proj: camera.inv_view_proj(),
+        };
+        self.queue
+            .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&[cu]));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("sky-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.sky_pipeline);
+        pass.set_bind_group(0, &self.sky_bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     /// F3: three cascade shadow depth maps (Depth32Float), one per cascade level.
     fn make_shadow_maps(device: &wgpu::Device, size: u32) -> [wgpu::TextureView; 3] {
         let mk = |i: u32| {
@@ -961,6 +1069,21 @@ impl GpuScene {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // F6 clouds: fullscreen sky pass (background with procedural clouds). Built after
+        // camera_buf so the bind group can reference it.
+        let sky_pipeline = Self::build_sky_pipeline(&device, &bind_group_layout);
+        let sky_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sky-bg"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &camera_buf,
+                    offset: 0,
+                    size: None,
+                }),
+            }],
+        });
         Ok(Self {
             device,
             queue,
@@ -984,6 +1107,8 @@ impl GpuScene {
             shadow_pass_bg,
             shadow_vp_buf,
             shadow_size,
+            sky_pipeline,
+            sky_bg,
             width,
             height,
             format,
@@ -1054,6 +1179,21 @@ impl GpuScene {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // F6 clouds: fullscreen sky pass (background with procedural clouds). Built after
+        // camera_buf so the bind group can reference it.
+        let sky_pipeline = Self::build_sky_pipeline(&device, &bind_group_layout);
+        let sky_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sky-bg"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &camera_buf,
+                    offset: 0,
+                    size: None,
+                }),
+            }],
+        });
         Ok(Self {
             device,
             queue,
@@ -1077,6 +1217,8 @@ impl GpuScene {
             shadow_pass_bg,
             shadow_vp_buf,
             shadow_size,
+            sky_pipeline,
+            sky_bg,
             width,
             height,
             format,
@@ -1180,6 +1322,7 @@ impl GpuScene {
             cascade_vp1: cvp1,
             cascade_vp2: cvp2,
             cascade_splits: [cascade_radii[0], cascade_radii[1], cascade_radii[2], 0.0],
+            inv_view_proj: camera.inv_view_proj(),
         };
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&[cu]));
@@ -1331,6 +1474,109 @@ impl GpuScene {
         Ok(())
     }
 
+    /// F6 clouds: render ONLY the sky pass (no voxel geometry) to a PNG. Used by the
+    /// `sky_has_clouds` pixel-oracle test to confirm procedural clouds appear in the
+    /// background. The sky pass fills the HDR target, then the post pass tonemaps it.
+    pub async fn render_sky_only_png(
+        &mut self,
+        camera: &GpuCamera,
+        time_of_day: f32,
+        path: &str,
+    ) -> anyhow::Result<()> {
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky-color-target"),
+            size: wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("sky-enc"),
+            });
+        // Sky pass -> HDR target (no geometry), then post pass -> PNG target.
+        let hdr = self.hdr_view.clone();
+        self.sky_pass(&mut encoder, &hdr, camera, time_of_day);
+        self.post_pass(&mut encoder, &target_view);
+        self.queue.submit(Some(encoder.finish()));
+
+        // Read back (same as render_triangles_png).
+        let bytes_per_row = (self.width * 4).next_multiple_of(256);
+        let buf_size = bytes_per_row as u64 * self.height as u64;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sky-readback"),
+            size: buf_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc2 = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("sky-readback-enc"),
+            });
+        enc2.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(enc2.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            let _ = tx.send(res);
+        });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("map channel closed"))?
+            .map_err(|e| anyhow::anyhow!("map failed: {e:?}"))?;
+        let data = slice.get_mapped_range()?;
+        let mut img = image::RgbaImage::new(self.width, self.height);
+        let is_bgra = matches!(self.format, wgpu::TextureFormat::Bgra8Unorm);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let i = (y * bytes_per_row + x * 4) as usize;
+                let [r, g, b, a] = [data[i], data[i + 1], data[i + 2], data[i + 3]];
+                if is_bgra {
+                    img.put_pixel(x, y, image::Rgba([b, g, r, a]));
+                } else {
+                    img.put_pixel(x, y, image::Rgba([r, g, b, a]));
+                }
+            }
+        }
+        drop(data);
+        staging.unmap();
+        img.save(path)?;
+        Ok(())
+    }
+
     /// Render triangles into an existing surface texture view (window path).
     pub fn render_to_view(
         &mut self,
@@ -1380,37 +1626,9 @@ impl GpuScene {
         let opaque: Vec<Triangle> = tris.iter().filter(|t| t.material.0 != 9).cloned().collect();
         let water: Vec<Triangle> = tris.iter().filter(|t| t.material.0 == 9).cloned().collect();
         // Clear HDR + depth up front so both the opaque and the (optional) water pass
-        // composite over a clean background regardless of which sets are present.
-        {
-            let _cp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("frame-clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.62,
-                            g: 0.66,
-                            b: 0.74,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                occlusion_query_set: None,
-                timestamp_writes: None,
-                multiview_mask: None,
-            });
-        }
+        // F6 clouds: draw the sky (with procedural clouds) as the background before the
+        // voxel scene composites on top. Replaces the old flat clear-colour.
+        self.sky_pass(encoder, target_view, camera, time_of_day);
         // Shadow pass uses whichever set is non-empty (maps cover the whole scene).
         let shadow_src: &[Triangle] = if !opaque.is_empty() { &opaque } else { &water };
         if !shadow_src.is_empty() {
@@ -1818,6 +2036,39 @@ mod tests {
     }
 
 
+    /// F6 clouds: the sky pass must show procedural cloud variation (not a flat gradient).
+    /// Render the sky-only pass looking upward and measure luminance std-dev in the upper
+    /// band — clouds produce visible brightness variation; a flat clear-colour would not.
+    #[test]
+    fn sky_has_clouds() {
+        futures::executor::block_on(async {
+            let mut scene = GpuScene::new_offscreen(256, 256).await.expect("gpu scene");
+            // Look upward so the upper half of the frame is sky (above the horizon).
+            let cam = GpuCamera::new([0.0, 50.0, 0.0], 0.0, 0.5, 1.0);
+            let path = std::env::temp_dir().join("f6_sky_clouds.png");
+            scene
+                .render_sky_only_png(&cam, 0.3, path.to_str().unwrap())
+                .await
+                .expect("sky png render");
+            let img = image::open(&path).expect("open png").to_luma8();
+            // Sample the upper band (above the horizon, where clouds live).
+            let mut lum: Vec<f32> = Vec::new();
+            for y in 0..(img.height() / 2) {
+                for x in 0..img.width() {
+                    lum.push(img.get_pixel(x, y)[0] as f32);
+                }
+            }
+            let mean = lum.iter().sum::<f32>() / lum.len() as f32;
+            let var = lum.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / lum.len() as f32;
+            let std = var.sqrt();
+            assert!(
+                std > 4.0,
+                "sky showed only {:.2} luminance std-dev (want > 4) — no cloud variation",
+                std
+            );
+        });
+    }
+
     /// Meet de gemiddelde verzadiging van de biome-tints (grass/dirt/stone/sand) in HSV;
     /// die moet boven een drempel liggen.
     #[test]
@@ -1868,6 +2119,7 @@ struct CameraUniform {
     cascade_vp1: mat4x4<f32>,
     cascade_vp2: mat4x4<f32>,
     cascade_splits: vec4<f32>, // x,y,z = distance splits for cascade 0/1/2
+    inv_view_proj: mat4x4<f32>, // F6 clouds: inverse view-proj for sky ray unprojection
 };
 @group(0) @binding(0) var<uniform> cam: CameraUniform;
 
@@ -2143,3 +2395,112 @@ fn vs_shadow(@location(0) in_pos: vec3<f32>) -> VOut {
     return o;
 }
 "#;
+
+/// F6 clouds: fullscreen sky pass drawn before the voxel scene. Computes a view ray per
+/// pixel from the camera basis, shades a warm/cool sky gradient (matching fs_main), and
+/// overlays procedural FBM clouds. No depth test — it is the background.
+const SKY_WGSL: &str = r#"
+struct CameraUniform {
+    view_proj: mat4x4<f32>,
+    fog_color: vec4<f32>,
+    params: vec4<f32>,   // x = fog_density, y = time_of_day
+    eye_pos: vec4<f32>,
+    sun_dir: vec4<f32>,
+    cascade_vp: mat4x4<f32>,
+    cascade_vp1: mat4x4<f32>,
+    cascade_vp2: mat4x4<f32>,
+    cascade_splits: vec4<f32>,
+    inv_view_proj: mat4x4<f32>, // F6 clouds: inverse view-proj for sky ray unprojection
+};
+@group(0) @binding(0) var<uniform> cam: CameraUniform;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,   // 0..1 screen UV
+};
+
+@vertex
+fn vs_sky(@builtin(vertex_index) vid: u32) -> VOut {
+    // Fullscreen triangle.
+    var p = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    var o: VOut;
+    let xy = p[vid];
+    o.pos = vec4<f32>(xy, 0.0, 1.0);
+    o.uv = xy * 0.5 + vec2<f32>(0.5, 0.5);
+    return o;
+}
+
+// Reconstruct a world-space view direction for a screen pixel by unprojecting the NDC
+// point with the inverse view-proj, then subtracting the camera eye.
+fn view_dir(uv: vec2<f32>) -> vec3<f32> {
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0);
+    // A point on the far plane (z = 1.0 in WebGPU clip), homogeneous w = 1.
+    let far_pt = cam.inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);
+    let world = far_pt.xyz / far_pt.w;
+    return normalize(world - cam.eye_pos.xyz);
+}
+
+// Hash-based value noise + fbm for cheap clouds.
+fn hash2(p: vec2<f32>) -> f32 {
+    let h = dot(p, vec2<f32>(127.1, 311.7));
+    return fract(sin(h) * 43758.5453);
+}
+fn vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash2(i + vec2<f32>(0.0, 0.0));
+    let b = hash2(i + vec2<f32>(1.0, 0.0));
+    let c = hash2(i + vec2<f32>(0.0, 1.0));
+    let d = hash2(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+fn fbm(p: vec2<f32>) -> f32 {
+    var v = 0.0;
+    var amp = 0.5;
+    var q = p;
+    for (var i = 0; i < 5; i = i + 1) {
+        v = v + amp * vnoise(q);
+        q = q * 2.02;
+        amp = amp * 0.5;
+    }
+    return v;
+}
+
+@fragment
+fn fs_sky(in: VOut) -> @location(0) vec4<f32> {
+    let dir = view_dir(in.uv);
+    let up = clamp(dir.y, -1.0, 1.0);
+
+    // Sky gradient (matches fs_main F2 colours).
+    let tod = cam.params.y;
+    let sun_elev = sin(tod * 6.2831853 - 1.5707963);
+    let day = smoothstep(-0.15, 0.25, sun_elev);
+    let golden = exp(-pow(sun_elev / 0.35, 2.0));
+    let horizon = mix(vec3<f32>(0.20, 0.22, 0.30), vec3<f32>(0.62, 0.74, 0.92), day);
+    let zenith  = mix(vec3<f32>(0.05, 0.06, 0.12), vec3<f32>(0.28, 0.45, 0.85), day);
+    let horizon_warm = mix(horizon, vec3<f32>(0.95, 0.55, 0.30), golden * 0.8);
+    var sky = mix(horizon_warm, zenith, clamp(up * 0.5 + 0.5, 0.0, 1.0));
+
+    // F6 clouds: project the view dir onto a dome plane; only above the horizon.
+    if (up > 0.02) {
+        // Dome UV from azimuth/elevation of the ray.
+        let az = atan2(dir.z, dir.x);
+        let el = asin(clamp(up, -1.0, 1.0));
+        let dome = vec2<f32>(az * 1.6, el * 2.2) * 3.0 + vec2<f32>(tod * 7.0, 0.0);
+        let n = fbm(dome);
+        // Coverage: more cloud lower in the dome, soft threshold.
+        let cover = smoothstep(0.45, 0.75, n) * smoothstep(0.0, 0.25, up);
+        var cloud_col = mix(vec3<f32>(0.78, 0.82, 0.88), vec3<f32>(1.0, 1.0, 1.0), n);
+        // Clouds catch warm light at golden hour.
+        cloud_col = mix(cloud_col, vec3<f32>(1.0, 0.8, 0.6), golden * 0.5 * cover);
+        sky = mix(sky, cloud_col, cover * 0.9);
+    }
+    return vec4<f32>(sky, 1.0);
+}
+"#;
+
