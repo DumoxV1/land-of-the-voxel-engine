@@ -28,6 +28,7 @@ voxel-world = { path = "../voxel-world" }
 voxel-worldgen = { path = "../voxel-worldgen" }
 voxel-player = { path = "../voxel-player" }
 voxel-gpu = { path = "../voxel-gpu" }
+voxel-edit = { path = "../voxel-edit" }
 # Tracy v0.13.1 client (tracy-client-sys 0.28.0). Pinned to match the profiler GUI the user
 # downloads. `enable` turns on the actual instrumentation; behind the `tracy` feature so the
 # default build stays Tracy-free (no C++ TU compile, no LAN broadcast).

@@ -29,7 +29,9 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes};
 
-use voxel_core::coords::{ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M};
+use voxel_core::coords::{ChunkCoord, CHUNK_SIZE, VOXEL_SIZE_M, WorldVoxel};
+use voxel_core::palette::MaterialId;
+use voxel_edit::{raycast_voxel, EditTool};
 use voxel_gpu::renderer::{GpuCamera, GpuScene};
 use voxel_gpu::{mesh_chunk_world_meters};
 use voxel_mesher::Triangle;
@@ -198,6 +200,10 @@ pub struct App {
     // Writes a one-line sample to profile_metrics.log every ~1s (feature-independent so the
     // normal build also produces telemetry Hermes can ingest).
     perf_log_timer: std::time::Instant,
+    // I1 (live edit): edit-tool (records edits) + set van chunks die de speler heeft bewerkt,
+    // zodat de streaming-worker die niet overschrijft met verse worldgen.
+    edit_tool: EditTool,
+    edited: std::collections::HashSet<ChunkCoord>,
 }
 
 impl Default for App {
@@ -297,6 +303,8 @@ impl Default for App {
             last_frame: std::time::Instant::now(),
             time_of_day: 0.32, // F2 dag/nacht: start in de vroege ochtend (gouden uur)
             perf_log_timer: std::time::Instant::now(),
+            edit_tool: EditTool::new(),
+            edited: std::collections::HashSet::new(),
         }
     }
 }
@@ -494,6 +502,13 @@ impl ApplicationHandler for App {
                     if !self.dragging {
                         self.last_mouse = None;
                     }
+                } else if state == ElementState::Pressed {
+                    // I1 live edit: rechts = plaats blok, midden = verwijder blok.
+                    match button {
+                        MouseButton::Right => self.edit_at_look(true),
+                        MouseButton::Middle => self.edit_at_look(false),
+                        _ => {}
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -655,8 +670,9 @@ impl App {
             match r {
                 voxel_gpu::WorkerMsg::Gen { coord, chunk } => {
                     // Collision-first: feed the client World (player physics) without waiting
-                    // for the mesh. Avoid clobbering an edited chunk.
-                    if !self.world.dirty_chunks().contains(&coord) {
+                    // for the mesh. Skip chunks the player has edited — do not clobber the
+                    // edit with fresh worldgen (I1).
+                    if !self.edited.contains(&coord) {
                         self.world.insert(coord, chunk);
                     }
                 }
@@ -893,6 +909,70 @@ impl App {
             ),
         }
     }
+    /// I1 (live edit): ray-cast from the camera through the look direction, then place or
+    /// remove a voxel at the hit. Re-meshes the affected chunk(s) from the edited `World` so
+    /// the change is visible immediately. Marks the chunk edited so the streaming worker does
+    /// not overwrite it with fresh worldgen.
+    fn edit_at_look(&mut self, place: bool) {
+        let eye_m = self.camera.eye;
+        // Eye in voxel units. floor() is vereist: negatieve coords zouden anders naar 0
+        // trunken (i64-cast van een negatief float is truncation, niet floor).
+        let origin = WorldVoxel::new(
+            (eye_m[0] / VOXEL_SIZE_M).floor() as i64,
+            (eye_m[1] / VOXEL_SIZE_M).floor() as i64,
+            (eye_m[2] / VOXEL_SIZE_M).floor() as i64,
+        );
+        // Look direction from yaw/pitch (matches the fly-mode forward vector).
+        let (sy, cy) = self.pitch.sin_cos();
+        let (sp, cp) = self.yaw.sin_cos();
+        let dir = [cp * cy, sy, sp * cy];
+        let max_dist = 200.0 / VOXEL_SIZE_M; // 200 m reach
+        let Some((hit, normal)) = raycast_voxel(&mut self.world, origin, dir, max_dist) else {
+            return; // nothing hit within reach
+        };
+        if place {
+            // Place on the empty face in front of the hit (hit + normal).
+            let target = WorldVoxel::new(hit.x + normal.x, hit.y + normal.y, hit.z + normal.z);
+            self.edit_tool.place(&mut self.world, target, MaterialId::from(3), 1, self.frame);
+        } else {
+            self.edit_tool.remove(&mut self.world, hit, 1, self.frame);
+        }
+        // Re-mesh every chunk touched by the edit (hit + placed neighbour) from the edited
+        // World, and mark them edited so the streaming worker won't clobber them. Also re-mesh
+        // the 6 face-neighbours of each edited chunk so edits on a chunk boundary show correct
+        // (no missing faces / holes at the seam).
+        let mut to_remesh: std::collections::HashSet<ChunkCoord> =
+            self.world.take_dirty();
+        let mut with_neighbours = to_remesh.clone();
+        for c in &to_remesh {
+            for dx in -1..=1i64 {
+                for dy in -1..=1i64 {
+                    for dz in -1..=1i64 {
+                        if dx == 0 && dy == 0 && dz == 0 {
+                            continue;
+                        }
+                        // Only the 6 face-neighbours (not the 20 edge/corner neighbours).
+                        if dx.abs() + dy.abs() + dz.abs() != 1 {
+                            continue;
+                        }
+                        with_neighbours.insert(ChunkCoord::new(c.x + dx, c.y + dy, c.z + dz));
+                    }
+                }
+            }
+        }
+        for coord in with_neighbours {
+            self.edited.insert(coord);
+            let chunk = self.world.get_or_generate(coord);
+            let tris = voxel_gpu::mesh_chunk_world_meters(
+                &chunk,
+                voxel_gpu::chunk_stream::Lod::Full,
+                false,
+                &[],
+                1024,
+            );
+            self.mesh_cache.insert(coord, tris, self.frame);
+        }
+    }
 }
 
 /// Start the live client: build the app, the winit event loop, and run until the window
@@ -905,7 +985,7 @@ pub fn run() {
         "Land of the Voxel Engine — micro-voxel client (12.5 cm/voxel, {} m chunks, view radius {} chunks ~{:.0} m)",
         CHUNK_M, VIEW_RADIUS, VIEW_RADIUS as f32 * CHUNK_M
     );
-    println!("WASD = move, Space = jump/up, Left-drag = look, F = toggle walk/fly. Close window to exit.");
+    println!("WASD = move, Space = jump/up, Left-drag = look, F = toggle walk/fly, Right = place block, Middle = remove block. Close window to exit.");
     let mut app = App::default();
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.run_app(&mut app).expect("run app");

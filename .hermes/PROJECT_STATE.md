@@ -319,6 +319,18 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       **Les (pipeline):** de audit-pijplijn ving een bug die tests + shader-groen misten — de
       onafhankelijke reviewer is niet optioneel.
 
+27x. ✅ **I1 LIVE EDIT (2026-07-20, autonoom onder nieuwe pipeline):** speler kan voxels
+      plaatsen/verwijderen in de lopende client. `raycast_voxel` (Amanatides-Woo DDA) in
+      `voxel-edit` (3 unit-tests, TDD rood→groen) schiet vanuit camera-eye langs de look-richting
+      en retourneert (hit, normal). Client: rechts-klik = plaats steen op hit+normal, midden-klik =
+      verwijder hit. Edit gaat via `EditTool` op `self.world`; dirty chunks worden her-mesht vanuit
+      de **edited World** (niet verse worldgen) + de 6 face-neighbours (chunk-grens-gat-fix).
+      `self.edited: HashSet<ChunkCoord>` blokkeert de streaming-worker (`WorkerMsg::Gen`) zodat de
+      edit niet overschreven wordt. **Onafhankelijke audit** vond 2 blokkerende bugs: grens-edit
+      re-mesh incompleet (gat) + negatieve-coord origin-truncatie. Beide gefixt + her-audit
+      **SAFE TO SHIP**. Verificatie: edit-raycast 3/3, worldgen 17/17, gpu 31/31, client_smoke
+      120/120. Gepusht als `<TBD>`.
+
 27u. ✅ **TRACY PROFILER-INTEGRATIE (2026-07-16, autonoom):** real-time frame-profiler achter
       `--features tracy`. `tracy-client` 0.18.4 + `tracy-client-sys` 0.28.0 (=Tracy v0.13.1,
       protocol-match met de GUI). Zones: `frame` (RedrawRequested) + `gpu_submit` (queue.submit) +
