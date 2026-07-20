@@ -340,7 +340,7 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       edit visueel. Fix: `Mesh`-branch krijgt `!self.edited`-guard + `load_edits` mesht de bewerkte
       chunks direct vanuit `self.world`. Her-audit **SAFE TO SHIP**. TDD-test
       `spike_i2_save_load` (save→reload→assert) 1/1 groen. Verificatie: client 3+1, worldgen 17/17,
-      gpu 31/31, smoke 120/120. Gepusht als `<TBD>`.
+      gpu 31/31, smoke 120/120. Gepusht als `c8d87ea`.
 
 27u. ✅ **TRACY PROFILER-INTEGRATIE (2026-07-16, autonoom):** real-time frame-profiler achter
       `--features tracy`. `tracy-client` 0.18.4 + `tracy-client-sys` 0.28.0 (=Tracy v0.13.1,
