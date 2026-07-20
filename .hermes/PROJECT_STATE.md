@@ -329,7 +329,7 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       edit niet overschreven wordt. **Onafhankelijke audit** vond 2 blokkerende bugs: grens-edit
       re-mesh incompleet (gat) + negatieve-coord origin-truncatie. Beide gefixt + her-audit
       **SAFE TO SHIP**. Verificatie: edit-raycast 3/3, worldgen 17/17, gpu 31/31, client_smoke
-      120/120. Gepusht als `<TBD>`.
+      120/120. Gepusht als `fccf888`.
 
 27u. ✅ **TRACY PROFILER-INTEGRATIE (2026-07-16, autonoom):** real-time frame-profiler achter
       `--features tracy`. `tracy-client` 0.18.4 + `tracy-client-sys` 0.28.0 (=Tracy v0.13.1,
