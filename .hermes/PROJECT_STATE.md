@@ -331,6 +331,17 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       **SAFE TO SHIP**. Verificatie: edit-raycast 3/3, worldgen 17/17, gpu 31/31, client_smoke
       120/120. Gepusht als `fccf888`.
 
+27y. ✅ **I2 SAVE/LOAD (2026-07-20, autonoom onder nieuwe pipeline):** edits persistent maken.
+      `voxel-persist` (bestaande S-07 spike) biedt `save_world`/`load_world` (seed + append-only
+      edit-log, atomic tmp+rename). Client: `App::save_edits` (roept na elke edit in `edit_at_look`),
+      `App::load_edits` (bij startup in `run()` als save bestaat), `App::apply_edit`,
+      `App::save_path` ("voxel_save.bin"). **Onafhankelijke audit** vond 1 blokkerende bug: de
+      `Mesh`-branch insert onvoorwaardelijk in `mesh_cache` → na load overschreef vers worldgen de
+      edit visueel. Fix: `Mesh`-branch krijgt `!self.edited`-guard + `load_edits` mesht de bewerkte
+      chunks direct vanuit `self.world`. Her-audit **SAFE TO SHIP**. TDD-test
+      `spike_i2_save_load` (save→reload→assert) 1/1 groen. Verificatie: client 3+1, worldgen 17/17,
+      gpu 31/31, smoke 120/120. Gepusht als `<TBD>`.
+
 27u. ✅ **TRACY PROFILER-INTEGRATIE (2026-07-16, autonoom):** real-time frame-profiler achter
       `--features tracy`. `tracy-client` 0.18.4 + `tracy-client-sys` 0.28.0 (=Tracy v0.13.1,
       protocol-match met de GUI). Zones: `frame` (RedrawRequested) + `gpu_submit` (queue.submit) +

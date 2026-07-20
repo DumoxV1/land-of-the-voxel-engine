@@ -36,9 +36,9 @@ use voxel_gpu::renderer::{GpuCamera, GpuScene};
 use voxel_gpu::{mesh_chunk_world_meters};
 use voxel_mesher::Triangle;
 use voxel_player::{Input, Player, PlayerController};
+use voxel_persist;
 use voxel_world::World;
 use voxel_worldgen::surface_height_m;
-
 /// Tracks in-flight chunk mesh requests so we can (a) avoid re-requesting a chunk that is
 /// already being generated, and (b) drop stale results when a newer request supersedes an
 /// older one (camera moved away/back). `complete()` removes BOTH bookkeeping entries so the
@@ -677,7 +677,12 @@ impl App {
                     }
                 }
                 voxel_gpu::WorkerMsg::Mesh { coord, tris } => {
-                    self.mesh_cache.insert(coord, tris, self.frame);
+                    // Skip worker meshes for edited chunks — the edit (meshed from self.world
+                    // in edit_at_look / after load) is authoritative. Otherwise a fresh worldgen
+                    // mesh would visually overwrite the player's edit (I2 regression).
+                    if !self.edited.contains(&coord) {
+                        self.mesh_cache.insert(coord, tris, self.frame);
+                    }
                 }
             }
         }
@@ -972,6 +977,73 @@ impl App {
             );
             self.mesh_cache.insert(coord, tris, self.frame);
         }
+        // I2: persist de edit onmiddellijk (atomic write) zodat hij na herstart blijft.
+        self.save_edits(&Self::save_path());
+    }
+
+    /// I2 (save/load): default save-file path (next to the executable's working dir).
+    fn save_path() -> std::path::PathBuf {
+        std::path::PathBuf::from("voxel_save.bin")
+    }
+
+    /// I2 (save/load): mutable borrow of the edited world (for external save helpers/tests).
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
+    }
+
+    /// I2 (save/load): immutable borrow of the world.
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
+    /// I2 (save/load): convenience — apply a place-edit through the tool onto the world,
+    /// without requiring two simultaneous mutable borrows from outside `App`.
+    pub fn apply_edit(&mut self, target: WorldVoxel, material: MaterialId) {
+        self.edit_tool
+            .place(&mut self.world, target, material, 1, self.frame);
+    }
+
+    /// I2 (save/load): persist the current world seed + edit log to `path` (atomic write).
+    pub fn save_edits(&self, path: &std::path::Path) {
+        if let Err(e) = voxel_persist::save_world(&self.world, &self.edit_tool.log(), path) {
+            eprintln!("save_edits failed: {e:?}");
+        }
+    }
+
+    /// I2 (save/load): load a previously saved world + edit log, replacing the current
+    /// world/edits and marking every loaded chunk as edited (so streaming won't clobber it).
+    pub fn load_edits(&mut self, path: &std::path::Path) {
+        match voxel_persist::load_world(path) {
+            Ok((world, log)) => {
+                // Replay edits onto the fresh world so `self.world` carries them, then adopt
+                // the tool's log for future edits.
+                self.world = world;
+                self.edit_tool = EditTool::new();
+                // Mark every chunk touched by an edit as edited so the worker won't overwrite.
+                for e in log.edits() {
+                    self.edited
+                        .insert(voxel_core::coords::ChunkCoord::from_world(e.world));
+                }
+                // Rebuild the tool log from the loaded edits (preserves revision order).
+                for e in log.edits() {
+                    self.edit_tool.place(&mut self.world, e.world, e.new, e.actor, e.tick);
+                }
+                // Mesh the edited chunks immediately from self.world (the authoritative edit
+                // source), so they are visible right after load — not overwritten by the worker.
+                for c in self.edited.clone() {
+                    let chunk = self.world.get_or_generate(c);
+                    let tris = voxel_gpu::mesh_chunk_world_meters(
+                        &chunk,
+                        voxel_gpu::chunk_stream::Lod::Full,
+                        false,
+                        &[],
+                        1024,
+                    );
+                    self.mesh_cache.insert(c, tris, self.frame);
+                }
+            }
+            Err(e) => eprintln!("load_edits failed: {e:?}"),
+        }
     }
 }
 
@@ -987,6 +1059,12 @@ pub fn run() {
     );
     println!("WASD = move, Space = jump/up, Left-drag = look, F = toggle walk/fly, Right = place block, Middle = remove block. Close window to exit.");
     let mut app = App::default();
+    // I2: laad een eerdere save terug als die bestaat (edits blijven na herstart).
+    let save = App::save_path();
+    if save.exists() {
+        app.load_edits(&save);
+        println!("Loaded previous save: {}", save.display());
+    }
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.run_app(&mut app).expect("run app");
 }
