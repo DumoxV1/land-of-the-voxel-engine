@@ -350,7 +350,7 @@ Na elke derde voltooide uitvoeringsstap wordt de vorige stap opnieuw gecontrolee
       sky, std-dev=0) → nu `inv_view_proj` (Rust `GpuCamera::inv_view_proj`, glam-matrix-inverse).
       Pixel-oracle `sky_has_clouds` (std-dev luminantie >4 in bovenste band) groen (10.27).
       Onafhankelijke audit **SAFE TO SHIP** (6/6 aspecten). Verificatie: gpu 32/32, worldgen 17/17,
-      client 3/3, smoke 120/120. Gepusht als `<TBD>`.
+      client 3/3, smoke 120/120. Gepusht als `4a142d9`.
 
 27u. ✅ **TRACY PROFILER-INTEGRATIE (2026-07-16, autonoom):** real-time frame-profiler achter
       `--features tracy`. `tracy-client` 0.18.4 + `tracy-client-sys` 0.28.0 (=Tracy v0.13.1,
